@@ -19,7 +19,7 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgres://agrocrm:agrocrm@db:5432/agrocrm?sslmode=disable
-      FRONTEND_ORIGIN: http://localhost:5173
+      FRONTEND_ORIGIN: http://localhost:5173,http://127.0.0.1:5173,http://0.0.0.0:5173
       PORT: 8080
       APPLICATIONS_EMAIL: ${APPLICATIONS_EMAIL:-}
       SMTP_HOST: ${SMTP_HOST:-}
