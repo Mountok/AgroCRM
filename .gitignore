@@ -1,0 +1,26 @@
+# Docs / planning notes
+*.md
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.agents/
+.anthracode/
+skills-lock.json
+
+# Local data
+postgres_data/
+*.log
