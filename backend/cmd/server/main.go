@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -39,6 +41,7 @@ func main() {
 	r.Use(cors.New(cors.Config{AllowOrigins: []string{env("FRONTEND_ORIGIN", "http://localhost:5173")}, AllowMethods: []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"}, AllowHeaders: []string{"Origin", "Content-Type", "Authorization"}}))
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 	r.POST("/auth/register", a.register)
+	r.POST("/auth/login", a.login)
 	r.GET("/farms", a.listFarms)
 	r.POST("/farms", a.createFarm)
 	r.GET("/farms/:farmId/fields", a.listFields)
@@ -61,6 +64,7 @@ func main() {
 	r.GET("/public/products", a.publicProducts)
 	r.POST("/public/orders", a.publicOrder)
 	r.POST("/public/leads", a.publicLead)
+	r.POST("/public/applications", a.publicApplication)
 	log.Fatal(r.Run(":" + env("PORT", "8080")))
 }
 
@@ -83,7 +87,8 @@ CREATE TABLE IF NOT EXISTS tasks(id SERIAL PRIMARY KEY, farm_id INT REFERENCES f
 CREATE TABLE IF NOT EXISTS harvests(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), planting_id INT REFERENCES plantings(id), crop_id INT REFERENCES crops(id), quantity_kg NUMERIC NOT NULL, harvest_date DATE DEFAULT current_date);
 CREATE TABLE IF NOT EXISTS customers(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), name TEXT NOT NULL, phone TEXT DEFAULT '', type TEXT DEFAULT 'restaurant');
 CREATE TABLE IF NOT EXISTS sales(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), customer_id INT REFERENCES customers(id), inventory_item_id INT REFERENCES inventory_items(id), quantity_kg NUMERIC NOT NULL, price_per_kg NUMERIC NOT NULL, revenue_amount NUMERIC NOT NULL, profit_amount NUMERIC NOT NULL, sale_date DATE DEFAULT current_date);
-CREATE TABLE IF NOT EXISTS external_orders(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), customer_name TEXT NOT NULL, phone TEXT DEFAULT '', items_json JSONB DEFAULT '[]', status TEXT DEFAULT 'new', estimated_amount NUMERIC DEFAULT 0, created_at TIMESTAMP DEFAULT now());`)
+CREATE TABLE IF NOT EXISTS external_orders(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), customer_name TEXT NOT NULL, phone TEXT DEFAULT '', items_json JSONB DEFAULT '[]', status TEXT DEFAULT 'new', estimated_amount NUMERIC DEFAULT 0, created_at TIMESTAMP DEFAULT now());
+CREATE TABLE IF NOT EXISTS access_applications(id SERIAL PRIMARY KEY, owner_name TEXT NOT NULL, farm_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT '', land_area TEXT DEFAULT '', business_scale TEXT DEFAULT '', region TEXT DEFAULT '', comment TEXT DEFAULT '', status TEXT DEFAULT 'new', created_at TIMESTAMP DEFAULT now());`)
 	return err
 }
 
@@ -109,6 +114,20 @@ func (a *app) register(c *gin.Context) {
 	a.db.QueryRow("INSERT INTO farms(name,region) VALUES($1,$2) RETURNING id", val(in.FarmName, "Новая ферма"), "Чеченская Республика").Scan(&id)
 	a.db.Exec("INSERT INTO users(farm_id,name,email) VALUES($1,$2,$3)", id, in.Name, in.Email)
 	c.JSON(201, gin.H{"farmId": id})
+}
+func (a *app) login(c *gin.Context) {
+	var in struct{ Email, Password string }
+	c.BindJSON(&in)
+	if in.Email == "" || in.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Введите логин и пароль"})
+		return
+	}
+	var farmID int
+	if err := a.db.QueryRow("SELECT id FROM farms ORDER BY id LIMIT 1").Scan(&farmID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"farmId": farmID, "name": "Ахмат Исаев", "role": "owner"})
 }
 func val(v, d string) string {
 	if v == "" {
@@ -287,3 +306,43 @@ func (a *app) publicOrder(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"status": "new"})
 }
 func (a *app) publicLead(c *gin.Context) { a.publicOrder(c) }
+
+func (a *app) publicApplication(c *gin.Context) {
+	var in struct {
+		OwnerName, FarmName, Email, Phone string
+		LandArea, BusinessScale, Region   string
+		Comment                           string
+	}
+	if err := c.BindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(in.OwnerName) == "" || strings.TrimSpace(in.Phone) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ФИО и телефон обязательны"})
+		return
+	}
+	var id int
+	err := a.db.QueryRow(`INSERT INTO access_applications(owner_name,farm_name,email,phone,land_area,business_scale,region,comment) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, in.OwnerName, in.FarmName, in.Email, in.Phone, in.LandArea, in.BusinessScale, in.Region, in.Comment).Scan(&id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := sendApplicationEmail(in, id); err != nil {
+		log.Printf("application email skipped/failed: %v", err)
+	}
+	c.JSON(http.StatusCreated, gin.H{"id": id, "status": "new", "message": "Заявка принята. Мы свяжемся с вами и выдадим доступ."})
+}
+
+func sendApplicationEmail(in struct{ OwnerName, FarmName, Email, Phone, LandArea, BusinessScale, Region, Comment string }, id int) error {
+	host := os.Getenv("SMTP_HOST")
+	port := env("SMTP_PORT", "587")
+	user := os.Getenv("SMTP_USER")
+	pass := os.Getenv("SMTP_PASSWORD")
+	to := env("APPLICATIONS_EMAIL", user)
+	if host == "" || user == "" || pass == "" || to == "" {
+		return fmt.Errorf("SMTP is not configured")
+	}
+	body := fmt.Sprintf("Новая заявка AgroCRM #%d\n\nФИО: %s\nФерма: %s\nТелефон: %s\nEmail: %s\nРегион: %s\nЗемля/масштаб: %s\nФормат хозяйства: %s\nКомментарий: %s\n", id, in.OwnerName, in.FarmName, in.Phone, in.Email, in.Region, in.LandArea, in.BusinessScale, in.Comment)
+	msg := "To: " + to + "\r\nSubject: Новая заявка AgroCRM\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + body
+	return smtp.SendMail(host+":"+port, smtp.PlainAuth("", user, pass, host), user, []string{to}, []byte(msg))
+}

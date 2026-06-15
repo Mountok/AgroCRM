@@ -1,11 +1,12 @@
 import React, {useEffect, useMemo, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {FiBell, FiCalendar, FiCheck, FiChevronDown, FiChevronLeft, FiChevronRight, FiClock, FiDownload, FiEye, FiFilter, FiHelpCircle, FiHome, FiMapPin, FiMenu, FiMinusCircle, FiMoreHorizontal, FiPlus, FiRefreshCw, FiSearch, FiSettings, FiUpload} from 'react-icons/fi';
+import {FiBell, FiCalendar, FiCheck, FiChevronDown, FiChevronLeft, FiChevronRight, FiClock, FiDownload, FiEye, FiFilter, FiHelpCircle, FiHome, FiLock, FiMail, FiMapPin, FiMenu, FiMinusCircle, FiMoreHorizontal, FiPhone, FiPlus, FiRefreshCw, FiSearch, FiSettings, FiUpload, FiUser} from 'react-icons/fi';
 import {GiCarrot, GiCorn, GiFarmTractor, GiFertilizerBag, GiGrain, GiPlantRoots, GiPotato, GiTomato, GiWheat, GiSprout} from 'react-icons/gi';
 import {FaBoxesStacked, FaCartShopping, FaChartLine, FaClipboardCheck, FaLeaf, FaRegUser, FaRubleSign, FaStore, FaUsers} from 'react-icons/fa6';
 import {MdInventory2, MdOutlineApi, MdOutlineSell, MdWarningAmber, MdWaterDrop, MdInfoOutline, MdLocalShipping} from 'react-icons/md';
 import './style.css';
 import './analytics.css';
+import './auth.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 const farmId = 1;
@@ -18,6 +19,7 @@ const post = (p, b) => api(p, {method: 'POST', body: JSON.stringify(b)});
 const num = (v, fallback = 0) => Number(v ?? fallback);
 
 function App() {
+  const [session, setSession] = useState(() => localStorage.getItem('agrocrm-session'));
   const [tab, setTab] = useState('dashboard');
   const [data, setData] = useState({});
   const [msg, setMsg] = useState('');
@@ -42,6 +44,8 @@ function App() {
     ['dashboard', 'Главная', FiHome], ['fields', 'Поля', FiMapPin], ['plantings', 'Посевы', GiWheat], ['inventory', 'Склад', FaStore], ['tasks', 'Задачи', FaClipboardCheck], ['harvests', 'Урожай', GiPlantRoots], ['customers', 'Клиенты', FaUsers], ['sales', 'Продажи', MdOutlineSell], ['analytics', 'Аналитика', FaChartLine], ['api', 'API', MdOutlineApi], ['settings', 'Настройки', FiSettings]
   ];
 
+  if (!session) return <AuthPage onLogin={(payload) => { localStorage.setItem('agrocrm-session', JSON.stringify(payload)); setSession(JSON.stringify(payload)); load().catch(e => setMsg(e.message)); }} />;
+
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand"><div className="logo"><FaLeaf /></div><span>AgroCRM</span></div>
@@ -50,7 +54,7 @@ function App() {
       <div className="profile"><div><FaRegUser /></div><p><b>Ахмат Исаев</b><span>Владелец фермы</span></p><FiChevronRight /></div>
     </aside>
     <main className="content">
-      <Topbar />
+      <Topbar onLogout={() => { localStorage.removeItem('agrocrm-session'); setSession(''); }} />
       {msg && <div className="toast">{msg}</div>}
       {tab === 'dashboard' && <Dashboard data={data} actions={actions} />}
       {tab !== 'dashboard' && <SecondaryPage tab={tab} data={data} actions={actions} />}
@@ -58,7 +62,23 @@ function App() {
   </div>;
 }
 
-function Topbar() { return <header className="topbar"><div className="left"><FiMenu /><b>Ферма Ахмат</b><FiChevronDown /><span><FiMapPin />Чеченская Республика</span></div><label className="search"><FiSearch /><input placeholder="Найти поле, клиента или культуру..." /><kbd>⌘K</kbd></label><div className="right"><div className="bell"><FiBell /><i>3</i></div><FiHelpCircle /><div className="avatar"><FaRegUser /></div><p><b>Ахмат Исаев</b><span>Владелец</span></p><FiChevronDown /></div></header> }
+function AuthPage({onLogin}) {
+  const [login, setLogin] = useState({email: '', password: ''});
+  const [form, setForm] = useState({ownerName: '', farmName: '', phone: '', email: '', region: '', landArea: '', businessScale: '', comment: ''});
+  const [status, setStatus] = useState('');
+  const submitLogin = async (e) => { e.preventDefault(); const r = await post('/auth/login', login); onLogin(r); };
+  const submitApplication = async (e) => { e.preventDefault(); const r = await post('/public/applications', form); setStatus(r.message || 'Заявка принята'); setForm({ownerName: '', farmName: '', phone: '', email: '', region: '', landArea: '', businessScale: '', comment: ''}); };
+  const set = (key, value) => setForm(prev => ({...prev, [key]: value}));
+  return <main className="auth-page">
+    <section className="auth-hero"><div className="auth-brand"><div className="logo"><FaLeaf /></div><span>AgroCRM</span></div><h1>Платная CRM для фермеров — доступ выдаётся после заявки</h1><p>Мы собираем данные о хозяйстве, оформляем профиль фермы и выдаём владельцу личный логин и пароль.</p><div className="auth-points"><span><FiCheck/>Профиль под ваше хозяйство</span><span><FiCheck/>Учёт земли, посевов и склада</span><span><FiCheck/>Аналитика прибыли и продаж</span></div></section>
+    <section className="auth-grid">
+      <form className="auth-card login-card" onSubmit={submitLogin}><span className="eyebrow">Уже есть доступ</span><h2>Вход в CRM</h2><label><FiMail/><input value={login.email} onChange={e=>setLogin({...login,email:e.target.value})} placeholder="Логин / email" /></label><label><FiLock/><input value={login.password} onChange={e=>setLogin({...login,password:e.target.value})} type="password" placeholder="Пароль" /></label><button className="auth-primary">Войти</button><button type="button" className="auth-demo" onClick={()=>onLogin({farmId:1,name:'Демо'})}>Войти в демо</button><small>Логин и пароль выдаёт команда AgroCRM после подключения.</small></form>
+      <form className="auth-card request-card" onSubmit={submitApplication}><span className="eyebrow">Нужен доступ</span><h2>Заявка на подключение</h2><div className="request-grid"><label><FiUser/><input required value={form.ownerName} onChange={e=>set('ownerName',e.target.value)} placeholder="ФИО предпринимателя" /></label><label><FaLeaf/><input value={form.farmName} onChange={e=>set('farmName',e.target.value)} placeholder="Название хозяйства" /></label><label><FiPhone/><input required value={form.phone} onChange={e=>set('phone',e.target.value)} placeholder="Телефон" /></label><label><FiMail/><input value={form.email} onChange={e=>set('email',e.target.value)} placeholder="Почта" /></label><label><FiMapPin/><input value={form.region} onChange={e=>set('region',e.target.value)} placeholder="Регион" /></label><label><GiFarmTractor/><input value={form.landArea} onChange={e=>set('landArea',e.target.value)} placeholder="Масштаб земли, например 20 га" /></label></div><select value={form.businessScale} onChange={e=>set('businessScale',e.target.value)}><option value="">Формат хозяйства</option><option>Личное подсобное хозяйство</option><option>ИП / малый фермер</option><option>Среднее хозяйство</option><option>Агробизнес с продажами</option></select><textarea value={form.comment} onChange={e=>set('comment',e.target.value)} placeholder="Что выращиваете и какие задачи хотите закрыть?" />{status && <div className="request-status"><FiCheck/>{status}</div>}<button className="auth-primary">Отправить заявку</button></form>
+    </section>
+  </main>;
+}
+
+function Topbar({onLogout}) { return <header className="topbar"><div className="left"><FiMenu /><b>Ферма Ахмат</b><FiChevronDown /><span><FiMapPin />Чеченская Республика</span></div><label className="search"><FiSearch /><input placeholder="Найти поле, клиента или культуру..." /><kbd>⌘K</kbd></label><div className="right"><div className="bell"><FiBell /><i>3</i></div><FiHelpCircle /><div className="avatar"><FaRegUser /></div><p><b>Ахмат Исаев</b><span>Владелец</span></p><button className="logout-btn" onClick={onLogout}>Выйти</button></div></header> }
 
 function Dashboard({data, actions}) {
   const inv = data.inventory || [];

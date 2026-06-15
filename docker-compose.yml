@@ -21,6 +21,11 @@ services:
       DATABASE_URL: postgres://agrocrm:agrocrm@db:5432/agrocrm?sslmode=disable
       FRONTEND_ORIGIN: http://localhost:5173
       PORT: 8080
+      APPLICATIONS_EMAIL: ${APPLICATIONS_EMAIL:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
     ports:
       - "8080:8080"
     depends_on:
