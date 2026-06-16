@@ -36,9 +36,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 	r.POST("/auth/register", a.limiter.Middleware(8, 15*time.Minute), a.register)
 	r.POST("/auth/login", a.limiter.Middleware(12, 15*time.Minute), a.login)
-	r.GET("/auth/me", func(c *gin.Context) {
-		c.JSON(200, gin.H{"farmId": 1, "name": "Ахмат Исаев", "role": "owner"})
-	})
+	r.GET("/auth/me", a.me)
 	r.PATCH("/auth/me", a.patchMe)
 
 	r.GET("/farms", a.list("SELECT id,name,region,address,created_at,updated_at FROM farms ORDER BY id"))
@@ -161,6 +159,17 @@ func (a *API) login(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"farmId": farmID, "name": name, "role": role})
+}
+
+func (a *API) me(c *gin.Context) {
+	var farmID int
+	var name, role, email, phone string
+	err := a.store.DB.QueryRow("SELECT farm_id,name,role,email,phone FROM users ORDER BY id LIMIT 1").Scan(&farmID, &name, &role, &email, &phone)
+	if err == nil {
+		c.JSON(200, gin.H{"farmId": farmID, "name": name, "role": role, "email": email, "phone": phone})
+		return
+	}
+	c.JSON(200, gin.H{"farmId": 1, "name": "Ахмат Исаев", "role": "owner", "email": "", "phone": ""})
 }
 
 func (a *API) patchMe(c *gin.Context) {
@@ -363,13 +372,25 @@ func (a *API) createPlanting(c *gin.Context) {
 		httpx.Error(c, 409, "INSUFFICIENT_SEED", "Недостаточно семян на складе")
 		return
 	}
-	tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg-$1 WHERE id=$2", in.SeedQuantityKg, itemID)
-	var pid int
-	tx.QueryRow("INSERT INTO plantings(farm_id,field_id,crop_id,seed_quantity_kg,expected_yield_kg,cost_amount) VALUES($1,$2,$3,$4,$5,$6) RETURNING id", c.Param("farmId"), in.FieldID, in.CropID, in.SeedQuantityKg, in.ExpectedYieldKg, in.SeedQuantityKg*18).Scan(&pid)
-	for i, t := range []string{"Посадка картофеля", "Первый полив", "Обработка поля", "Проверка всходов"} {
-		tx.Exec("INSERT INTO tasks(farm_id,field_id,planting_id,title,due_date) VALUES($1,$2,$3,$4,current_date+$5)", c.Param("farmId"), in.FieldID, pid, t, i+1)
+	if _, err := tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg-$1 WHERE id=$2", in.SeedQuantityKg, itemID); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка обновления склада")
+		return
 	}
-	tx.Commit()
+	var pid int
+	if err := tx.QueryRow("INSERT INTO plantings(farm_id,field_id,crop_id,seed_quantity_kg,expected_yield_kg,cost_amount) VALUES($1,$2,$3,$4,$5,$6) RETURNING id", c.Param("farmId"), in.FieldID, in.CropID, in.SeedQuantityKg, in.ExpectedYieldKg, in.SeedQuantityKg*18).Scan(&pid); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка создания посева")
+		return
+	}
+	for i, t := range []string{"Посадка картофеля", "Первый полив", "Обработка поля", "Проверка всходов"} {
+		if _, err := tx.Exec("INSERT INTO tasks(farm_id,field_id,planting_id,title,due_date) VALUES($1,$2,$3,$4,current_date + ($5 * INTERVAL '1 day'))", c.Param("farmId"), in.FieldID, pid, t, i+1); err != nil {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка создания задач по посеву")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка сохранения посева")
+		return
+	}
 	c.JSON(201, gin.H{"id": pid, "remainingSeedKg": qty - in.SeedQuantityKg, "warning": qty-in.SeedQuantityKg < min})
 }
 func (a *API) patchPlanting(c *gin.Context) {
@@ -543,20 +564,37 @@ func (a *API) createHarvest(c *gin.Context) {
 	tx, _ := a.store.DB.Begin()
 	defer tx.Rollback()
 	var fieldID sql.NullInt64
-	tx.QueryRow("SELECT field_id FROM plantings WHERE id=$1", in.PlantingID).Scan(&fieldID)
+	if in.PlantingID > 0 {
+		if err := tx.QueryRow("SELECT field_id FROM plantings WHERE id=$1", in.PlantingID).Scan(&fieldID); err != nil && err != sql.ErrNoRows {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка загрузки посева для урожая")
+			return
+		}
+	}
 	var itemID int
 	err := tx.QueryRow("SELECT id FROM inventory_items WHERE farm_id=$1 AND crop_id=$2 AND type='harvest' LIMIT 1 FOR UPDATE", c.Param("farmId"), in.CropID).Scan(&itemID)
 	if err == sql.ErrNoRows {
-		tx.QueryRow("INSERT INTO inventory_items(farm_id,type,name,crop_id,quantity_kg,min_quantity_kg,average_cost_per_kg) SELECT $1,'harvest',name,$2,$3,0,15 FROM crops WHERE id=$2 RETURNING id", c.Param("farmId"), in.CropID, in.QuantityKg).Scan(&itemID)
+		if err := tx.QueryRow("INSERT INTO inventory_items(farm_id,type,name,crop_id,quantity_kg,min_quantity_kg,average_cost_per_kg) SELECT $1,'harvest',name,$2,$3,0,15 FROM crops WHERE id=$2 RETURNING id", c.Param("farmId"), in.CropID, in.QuantityKg).Scan(&itemID); err != nil {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка создания складской позиции урожая")
+			return
+		}
 	} else if err == nil {
-		tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg+$1 WHERE id=$2", in.QuantityKg, itemID)
+		if _, err := tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg+$1 WHERE id=$2", in.QuantityKg, itemID); err != nil {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка обновления склада урожая")
+			return
+		}
 	} else {
 		httpx.Error(c, 500, "DB_ERROR", "Ошибка склада")
 		return
 	}
 	var id int
-	tx.QueryRow("INSERT INTO harvests(farm_id,planting_id,field_id,crop_id,quantity_kg,quality_grade,added_to_inventory_item_id) VALUES($1,NULLIF($2,0),$3,$4,$5,$6,$7) RETURNING id", c.Param("farmId"), in.PlantingID, fieldID, in.CropID, in.QuantityKg, trim(in.QualityGrade, 80), itemID).Scan(&id)
-	tx.Commit()
+	if err := tx.QueryRow("INSERT INTO harvests(farm_id,planting_id,field_id,crop_id,quantity_kg,quality_grade,added_to_inventory_item_id) VALUES($1,NULLIF($2,0),$3,$4,$5,$6,$7) RETURNING id", c.Param("farmId"), in.PlantingID, fieldID, in.CropID, in.QuantityKg, trim(in.QualityGrade, 80), itemID).Scan(&id); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка создания записи урожая")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка сохранения урожая")
+		return
+	}
 	c.JSON(201, gin.H{"id": id, "inventoryItemId": itemID})
 }
 func (a *API) patchHarvest(c *gin.Context) {
@@ -1077,10 +1115,25 @@ func value(v, fallback string) string {
 }
 func nonNegative(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
 func readText(c *gin.Context, key string) string {
+	if cached, ok := c.Get("json_body_map"); ok {
+		if m, ok := cached.(map[string]any); ok {
+			if v, ok := m[key]; ok {
+				if s, ok := v.(string); ok {
+					return trim(s, 500)
+				}
+			}
+			return ""
+		}
+	}
 	var m map[string]any
-	_ = c.ShouldBindJSON(&m)
+	if err := c.ShouldBindJSON(&m); err != nil {
+		return ""
+	}
+	c.Set("json_body_map", m)
 	if v, ok := m[key]; ok {
-		return trim(v.(string), 500)
+		if s, ok := v.(string); ok {
+			return trim(s, 500)
+		}
 	}
 	return ""
 }
