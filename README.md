@@ -180,11 +180,3 @@ curl http://localhost:8080/health
 # Открыть Swagger
 open http://localhost:8080/swagger
 ```
-
-## Документация для презентации
-
-Тезисы для защиты проекта лежат в:
-
-```text
-PRESENTATION.md
-```
