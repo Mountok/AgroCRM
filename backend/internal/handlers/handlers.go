@@ -34,6 +34,11 @@ func New(store *store.Store, limiter *httpx.Limiter) *API {
 
 func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	// Swagger UI
+	r.GET("/swagger/doc.yaml", swaggerDocHandler)
+	r.GET("/swagger/index.html", swaggerUIHandler)
+	r.GET("/swagger", swaggerUIHandler)
 	r.POST("/auth/register", a.limiter.Middleware(8, 15*time.Minute), a.register)
 	r.POST("/auth/login", a.limiter.Middleware(12, 15*time.Minute), a.login)
 	r.GET("/auth/me", a.me)

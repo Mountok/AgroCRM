@@ -1,0 +1,1756 @@
+openapi: "3.0.3"
+info:
+  title: AgroCRM API
+  description: |
+    API для управления фермерским хозяйством.
+    Основной демо-флоу: ферма → поля → посадка картофеля → списание семян → задачи → сбор урожая → склад → продажа → дашборд прибыли → публичное API.
+  version: "1.0.0"
+  contact:
+    name: AgroCRM Hackathon Team
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  # ─── Health ────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Проверка здоровья сервера
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+
+  # ─── Auth ──────────────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Регистрация нового пользователя и фермы
+      operationId: authRegister
+      x-rate-limit: "8 запросов / 15 минут"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, farmName]
+              properties:
+                name:
+                  type: string
+                  description: Имя пользователя
+                  example: "Ахмат Исаев"
+                email:
+                  type: string
+                  format: email
+                  description: Email пользователя
+                  example: "akhmat@example.com"
+                password:
+                  type: string
+                  description: Пароль
+                  example: "demo123"
+                farmName:
+                  type: string
+                  description: Название фермы
+                  example: "Ферма Ахмат"
+                phone:
+                  type: string
+                  description: Телефон (опционально)
+                  example: "+7-999-123-45-67"
+      responses:
+        "200":
+          description: Успешная регистрация
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Некорректные данные
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Вход в систему
+      operationId: authLogin
+      x-rate-limit: "12 запросов / 15 минут"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "demo"
+                password:
+                  type: string
+                  example: "demo"
+      responses:
+        "200":
+          description: Успешный вход
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          description: Неверные учётные данные
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Получить текущего пользователя
+      operationId: authMe
+      responses:
+        "200":
+          description: Данные пользователя
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+    patch:
+      tags: [Auth]
+      summary: Обновить профиль пользователя
+      operationId: authUpdateMe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                farmId:
+                  type: integer
+                  description: ID фермы
+                name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+      responses:
+        "200":
+          description: Профиль обновлён
+
+  # ─── Farms ─────────────────────────────────────────
+  /farms:
+    get:
+      tags: [Farms]
+      summary: Список всех ферм
+      operationId: listFarms
+      responses:
+        "200":
+          description: Список ферм
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Farm"
+    post:
+      tags: [Farms]
+      summary: Создать новую ферму
+      operationId: createFarm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  example: "Новая ферма"
+                region:
+                  type: string
+                  example: "Московская область"
+                address:
+                  type: string
+                  example: "д. Примерово, ул. Полевая, 1"
+      responses:
+        "200":
+          description: Ферма создана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Farm"
+
+  "/farms/{farmId}":
+    get:
+      tags: [Farms]
+      summary: Получить ферму по ID
+      operationId: getFarm
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные фермы
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Farm"
+    patch:
+      tags: [Farms]
+      summary: Обновить ферму
+      operationId: updateFarm
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                region: { type: string }
+                address: { type: string }
+      responses:
+        "200":
+          description: Ферма обновлена
+
+  # ─── Fields ────────────────────────────────────────
+  "/farms/{farmId}/fields":
+    get:
+      tags: [Fields]
+      summary: Список полей фермы
+      operationId: listFields
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список полей
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Field"
+    post:
+      tags: [Fields]
+      summary: Создать поле
+      operationId: createField
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "Поле №2" }
+                areaHectares: { type: number, format: float, example: 5.5 }
+                location: { type: string, example: "Северный участок" }
+                soilType: { type: string, example: "чернозём" }
+                status: { type: string, enum: [ready, planted, harvested], example: "ready" }
+      responses:
+        "200":
+          description: Поле создано
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Field"
+
+  "/fields/{fieldId}":
+    get:
+      tags: [Fields]
+      summary: Получить поле по ID
+      operationId: getField
+      parameters:
+        - name: fieldId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные поля
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Field"
+    patch:
+      tags: [Fields]
+      summary: Обновить поле
+      operationId: updateField
+      parameters:
+        - name: fieldId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                areaHectares: { type: number, format: float, nullable: true }
+                location: { type: string }
+                soilType: { type: string }
+                status: { type: string, enum: [ready, planted, harvested] }
+      responses:
+        "200":
+          description: Поле обновлено
+    delete:
+      tags: [Fields]
+      summary: Удалить поле
+      operationId: deleteField
+      parameters:
+        - name: fieldId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Поле удалено
+
+  # ─── Crops ─────────────────────────────────────────
+  "/farms/{farmId}/crops":
+    get:
+      tags: [Crops]
+      summary: Список культур
+      operationId: listCrops
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список культур
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Crop"
+    post:
+      tags: [Crops]
+      summary: Создать культуру
+      operationId: createCrop
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "Пшеница" }
+                category: { type: string, example: "зерновые" }
+                pricePerKg: { type: number, format: float, example: 15.0 }
+                seedRate: { type: number, format: float, example: 200.0, description: "Норма высева (кг/га)" }
+      responses:
+        "200":
+          description: Культура создана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Crop"
+
+  "/crops/{cropId}":
+    get:
+      tags: [Crops]
+      summary: Получить культуру по ID
+      operationId: getCrop
+      parameters:
+        - name: cropId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные культуры
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Crop"
+    patch:
+      tags: [Crops]
+      summary: Обновить культуру
+      operationId: updateCrop
+      parameters:
+        - name: cropId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                category: { type: string }
+                pricePerKg: { type: number, format: float }
+                seedRate: { type: number, format: float }
+      responses:
+        "200":
+          description: Культура обновлена
+    delete:
+      tags: [Crops]
+      summary: Удалить культуру
+      operationId: deleteCrop
+      parameters:
+        - name: cropId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Культура удалена
+
+  # ─── Inventory ──────────────────────────────────────
+  "/farms/{farmId}/inventory":
+    get:
+      tags: [Inventory]
+      summary: Список товаров на складе
+      operationId: listInventory
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список товаров
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InventoryItem"
+    post:
+      tags: [Inventory]
+      summary: Добавить товар на склад
+      operationId: createInventoryItem
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type]
+              properties:
+                type: { type: string, enum: [seed, harvest, other], example: "seed" }
+                name: { type: string, example: "Семена картофеля" }
+                cropId: { type: integer, example: 1 }
+                quantityKg: { type: number, format: float, example: 500 }
+                unit: { type: string, example: "кг" }
+                minQuantityKg: { type: number, format: float, example: 100 }
+                averageCostPerKg: { type: number, format: float, example: 50 }
+      responses:
+        "200":
+          description: Товар добавлен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryItem"
+
+  "/inventory/{itemId}":
+    get:
+      tags: [Inventory]
+      summary: Получить товар по ID
+      operationId: getInventoryItem
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные товара
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryItem"
+    patch:
+      tags: [Inventory]
+      summary: Обновить товар
+      operationId: updateInventoryItem
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: { type: string, enum: [seed, harvest, other] }
+                name: { type: string }
+                cropId: { type: integer, nullable: true }
+                quantityKg: { type: number, format: float, nullable: true }
+                unit: { type: string }
+                minQuantityKg: { type: number, format: float, nullable: true }
+                averageCostPerKg: { type: number, format: float, nullable: true }
+      responses:
+        "200":
+          description: Товар обновлён
+    delete:
+      tags: [Inventory]
+      summary: Удалить товар
+      operationId: deleteInventoryItem
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Товар удалён
+
+  "/inventory/{itemId}/adjust":
+    post:
+      tags: [Inventory]
+      summary: Скорректировать количество товара
+      operationId: adjustInventory
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deltaKg]
+              properties:
+                deltaKg:
+                  type: number
+                  format: float
+                  description: "Положительное = добавка, отрицательное = списание"
+                  example: -50
+      responses:
+        "200":
+          description: Количество скорректировано
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  newQuantityKg:
+                    type: number
+                    format: float
+                    example: 450
+
+  "/farms/{farmId}/inventory/low-stock":
+    get:
+      tags: [Inventory]
+      summary: Товары с низким запасом (< min_quantity_kg)
+      operationId: getLowStock
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список товаров с низким запасом
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InventoryItem"
+
+  # ─── Purchases ──────────────────────────────────────
+  "/farms/{farmId}/purchases":
+    get:
+      tags: [Purchases]
+      summary: Список закупок
+      operationId: listPurchases
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список закупок
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Purchase"
+    post:
+      tags: [Purchases]
+      summary: Создать закупку (+ увеличивает склад)
+      operationId: createPurchase
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inventoryItemId, quantityKg, pricePerKg]
+              properties:
+                inventoryItemId: { type: integer, example: 1 }
+                supplierName: { type: string, example: "ООО Агроснаб" }
+                quantityKg: { type: number, format: float, example: 1000 }
+                pricePerKg: { type: number, format: float, example: 45 }
+      responses:
+        "200":
+          description: Закупка создана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Purchase"
+
+  # ─── Plantings ──────────────────────────────────────
+  "/farms/{farmId}/plantings":
+    get:
+      tags: [Plantings]
+      summary: Список посевов
+      operationId: listPlantings
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список посевов (с названиями поля и культуры)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Planting"
+    post:
+      tags: [Plantings]
+      summary: Создать посев (списывает семена со склада, создаёт задачи)
+      operationId: createPlanting
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fieldId, cropId, seedQuantityKg]
+              properties:
+                fieldId: { type: integer, example: 1 }
+                cropId: { type: integer, example: 1 }
+                seedQuantityKg: { type: number, format: float, example: 500, description: "Сколько кг семян использовать" }
+                expectedYieldKg: { type: number, format: float, example: 10000, description: "Ожидаемый урожай (кг)" }
+      responses:
+        "200":
+          description: Посев создан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer, example: 1 }
+                  remainingSeedKg: { type: number, format: float, description: "Остаток семян на складе после списания", example: 200 }
+                  warning: { type: boolean, description: "Предупреждение о нехватке семян", example: false }
+
+  "/plantings/{plantingId}":
+    get:
+      tags: [Plantings]
+      summary: Получить посев по ID
+      operationId: getPlanting
+      parameters:
+        - name: plantingId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные посева
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Planting"
+    patch:
+      tags: [Plantings]
+      summary: Обновить посев
+      operationId: updatePlanting
+      parameters:
+        - name: plantingId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fieldId: { type: integer, nullable: true }
+                cropId: { type: integer, nullable: true }
+                seedQuantityKg: { type: number, format: float, nullable: true }
+                expectedYieldKg: { type: number, format: float, nullable: true }
+                status: { type: string, enum: [active, harvested] }
+                plantingDate: { type: string, format: date }
+                plannedHarvestDate: { type: string, format: date }
+      responses:
+        "200":
+          description: Посев обновлён
+    delete:
+      tags: [Plantings]
+      summary: Удалить посев (возвращает семена на склад, удаляет задачи)
+      operationId: deletePlanting
+      parameters:
+        - name: plantingId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Посев удалён
+
+  "/plantings/{plantingId}/complete":
+    post:
+      tags: [Plantings]
+      summary: Завершить посев (статус → harvested)
+      operationId: completePlanting
+      parameters:
+        - name: plantingId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Посев завершён
+
+  # ─── Tasks ──────────────────────────────────────────
+  "/farms/{farmId}/tasks":
+    get:
+      tags: [Tasks]
+      summary: Список задач фермы (сортировка по дате)
+      operationId: listTasks
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список задач
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+    post:
+      tags: [Tasks]
+      summary: Создать задачу
+      operationId: createTask
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, example: "Внести удобрения" }
+                description: { type: string, example: "Азотные удобрения, 200 кг" }
+                type: { type: string, enum: [planting, irrigation, fertilizing, pest_control, harvesting, other], example: "fertilizing" }
+                status: { type: string, enum: [todo, in_progress, done], example: "todo" }
+                dueDate: { type: string, format: date, example: "2026-07-01" }
+                fieldId: { type: integer, example: 1 }
+                plantingId: { type: integer, example: 1 }
+      responses:
+        "200":
+          description: Задача создана
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+
+  "/tasks/{taskId}":
+    get:
+      tags: [Tasks]
+      summary: Получить задачу по ID
+      operationId: getTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные задачи
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+    patch:
+      tags: [Tasks]
+      summary: Обновить задачу
+      operationId: updateTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                description: { type: string }
+                type: { type: string }
+                status: { type: string, enum: [todo, in_progress, done] }
+                dueDate: { type: string, format: date }
+                fieldId: { type: integer, nullable: true }
+                plantingId: { type: integer, nullable: true }
+      responses:
+        "200":
+          description: Задача обновлена
+    delete:
+      tags: [Tasks]
+      summary: Удалить задачу
+      operationId: deleteTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Задача удалена
+
+  "/tasks/{taskId}/complete":
+    post:
+      tags: [Tasks]
+      summary: Отметить задачу как выполненную
+      operationId: completeTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Задача выполнена
+
+  # ─── Harvests ───────────────────────────────────────
+  "/farms/{farmId}/harvests":
+    get:
+      tags: [Harvests]
+      summary: Список урожаев
+      operationId: listHarvests
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список урожаев
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Harvest"
+    post:
+      tags: [Harvests]
+      summary: Создать запись урожая (+ зачисляет на склад)
+      operationId: createHarvest
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plantingId, cropId, quantityKg]
+              properties:
+                plantingId: { type: integer, example: 1 }
+                cropId: { type: integer, example: 1 }
+                quantityKg: { type: number, format: float, example: 8000 }
+                qualityGrade: { type: string, enum: ["высший", "первый", "второй"], example: "высший" }
+      responses:
+        "200":
+          description: Урожай записан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer, example: 1 }
+                  inventoryItemId: { type: integer, description: "ID товара на складе, куда зачислен урожай" }
+
+  "/harvests/{harvestId}":
+    get:
+      tags: [Harvests]
+      summary: Получить запись урожая
+      operationId: getHarvest
+      parameters:
+        - name: harvestId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные урожая
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Harvest"
+    patch:
+      tags: [Harvests]
+      summary: Обновить запись урожая (только qualityGrade)
+      operationId: updateHarvest
+      parameters:
+        - name: harvestId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                qualityGrade: { type: string }
+      responses:
+        "200":
+          description: Урожай обновлён
+    delete:
+      tags: [Harvests]
+      summary: Удалить запись урожая (уменьшает склад)
+      operationId: deleteHarvest
+      parameters:
+        - name: harvestId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Урожай удалён
+
+  # ─── Customers ──────────────────────────────────────
+  "/farms/{farmId}/customers":
+    get:
+      tags: [Customers]
+      summary: Список клиентов
+      operationId: listCustomers
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список клиентов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Customer"
+    post:
+      tags: [Customers]
+      summary: Создать клиента
+      operationId: createCustomer
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "Магазин Продукты" }
+                type: { type: string, enum: [restaurant, shop, individual, wholesaler], example: "wholesaler" }
+                phone: { type: string, example: "+7-999-888-77-66" }
+                email: { type: string, format: email }
+                address: { type: string }
+                notes: { type: string }
+      responses:
+        "200":
+          description: Клиент создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+
+  "/customers/{customerId}":
+    get:
+      tags: [Customers]
+      summary: Получить клиента по ID
+      operationId: getCustomer
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные клиента
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Customer"
+    patch:
+      tags: [Customers]
+      summary: Обновить клиента
+      operationId: updateCustomer
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                type: { type: string }
+                phone: { type: string }
+                email: { type: string, format: email }
+                address: { type: string }
+                notes: { type: string }
+      responses:
+        "200":
+          description: Клиент обновлён
+    delete:
+      tags: [Customers]
+      summary: Удалить клиента
+      operationId: deleteCustomer
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Клиент удалён
+
+  # ─── Sales ──────────────────────────────────────────
+  "/farms/{farmId}/sales":
+    get:
+      tags: [Sales]
+      summary: Список продаж (с названиями клиента и товара)
+      operationId: listSales
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список продаж
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Sale"
+    post:
+      tags: [Sales]
+      summary: Создать продажу (списывает со склада, считает прибыль)
+      operationId: createSale
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerId, inventoryItemId, quantityKg, pricePerKg]
+              properties:
+                customerId: { type: integer, example: 1 }
+                inventoryItemId: { type: integer, example: 1 }
+                quantityKg: { type: number, format: float, example: 500 }
+                pricePerKg: { type: number, format: float, example: 80 }
+      responses:
+        "200":
+          description: Продажа создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  revenue: { type: number, format: float }
+                  profit: { type: number, format: float }
+
+  "/sales/{saleId}":
+    get:
+      tags: [Sales]
+      summary: Получить продажу по ID
+      operationId: getSale
+      parameters:
+        - name: saleId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Данные продажи
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sale"
+    patch:
+      tags: [Sales]
+      summary: Обновить статус продажи
+      operationId: updateSale
+      parameters:
+        - name: saleId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [pending, paid, cancelled] }
+      responses:
+        "200":
+          description: Статус продажи обновлён
+    delete:
+      tags: [Sales]
+      summary: Удалить продажу (возвращает товар на склад)
+      operationId: deleteSale
+      parameters:
+        - name: saleId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Продажа удалена
+
+  # ─── API Keys ───────────────────────────────────────
+  "/farms/{farmId}/api-keys":
+    get:
+      tags: [API Keys]
+      summary: Список API-ключей
+      operationId: listApiKeys
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список ключей
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApiKey"
+    post:
+      tags: [API Keys]
+      summary: Создать API-ключ
+      operationId: createApiKey
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "Мой ключ для интеграции" }
+      responses:
+        "200":
+          description: Ключ создан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  apiKey: { type: string, description: "Полный ключ (показывается один раз)", example: "agro_abc123..." }
+                  prefix: { type: string, example: "agro_" }
+
+  "/api-keys/{apiKeyId}/revoke":
+    patch:
+      tags: [API Keys]
+      summary: Отозвать API-ключ
+      operationId: revokeApiKey
+      parameters:
+        - name: apiKeyId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Ключ отозван
+
+  # ─── Dashboard & Analytics ─────────────────────────
+  "/farms/{farmId}/dashboard":
+    get:
+      tags: [Dashboard]
+      summary: Сводка дашборда
+      operationId: getDashboard
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Сводные показатели
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totalRevenue:
+                    type: number
+                    format: float
+                    description: Общая выручка
+                  totalProfit:
+                    type: number
+                    format: float
+                    description: Общая прибыль
+                  totalHarvestKg:
+                    type: number
+                    format: float
+                    description: Всего собрано урожая (кг)
+                  totalSeedKg:
+                    type: number
+                    format: float
+                    description: Всего семян на складе (кг)
+
+  "/farms/{farmId}/analytics/profit-by-crop":
+    get:
+      tags: [Analytics]
+      summary: Прибыль по культурам
+      operationId: profitByCrop
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Прибыль в разрезе культур
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    crop_name: { type: string }
+                    revenue: { type: number, format: float }
+                    cost: { type: number, format: float }
+                    profit: { type: number, format: float }
+
+  "/farms/{farmId}/analytics/inventory-summary":
+    get:
+      tags: [Analytics]
+      summary: Сводка по складу (по типу)
+      operationId: inventorySummary
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Сводка по типам товаров
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type: { type: string }
+                    count: { type: integer }
+                    total_quantity_kg: { type: number, format: float }
+
+  "/farms/{farmId}/analytics/upcoming-tasks":
+    get:
+      tags: [Analytics]
+      summary: Следующие 10 задач (не выполненные)
+      operationId: upcomingTasks
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Список предстоящих задач
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+
+  # ─── Export / Import XLSX ──────────────────────────
+  "/farms/{farmId}/export/{kind}":
+    get:
+      tags: [Import/Export]
+      summary: Экспорт данных в XLSX
+      operationId: exportXLSX
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [fields, inventory, plantings, tasks, harvests, customers, sales, analytics]
+      responses:
+        "200":
+          description: XLSX файл
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+
+  "/farms/{farmId}/import/{kind}":
+    post:
+      tags: [Import/Export]
+      summary: Импорт данных из XLSX
+      operationId: importXLSX
+      parameters:
+        - name: farmId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [fields, inventory, plantings, customers]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: XLSX файл
+      responses:
+        "200":
+          description: Данные импортированы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported: { type: integer, description: "Количество импортированных записей" }
+
+  # ─── Public API ─────────────────────────────────────
+  /public/products:
+    get:
+      tags: [Public API]
+      summary: Список доступной продукции (type=harvest, qty>0)
+      operationId: publicProducts
+      security: []
+      responses:
+        "200":
+          description: Список товаров для публичного API
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PublicProduct"
+
+  /public/orders:
+    post:
+      tags: [Public API]
+      summary: Публичный заказ
+      operationId: publicOrder
+      security: []
+      x-rate-limit: "40 запросов / 1 час"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerName, items]
+              properties:
+                customerName:
+                  type: string
+                  example: "Иван Петров"
+                phone:
+                  type: string
+                  example: "+7-999-111-22-33"
+                email:
+                  type: string
+                  format: email
+                  example: "ivan@example.com"
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [productId, quantityKg]
+                    properties:
+                      productId: { type: integer, example: 1 }
+                      quantityKg: { type: number, format: float, example: 100 }
+      responses:
+        "200":
+          description: Заказ создан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  status: { type: string, example: "new" }
+                  estimatedAmount: { type: number, format: float }
+
+  /public/leads:
+    post:
+      tags: [Public API]
+      summary: Публичная заявка (лид) на связь
+      operationId: publicLead
+      security: []
+      x-rate-limit: "20 запросов / 1 час"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "Сергей Иванов" }
+                phone: { type: string }
+                email: { type: string, format: email }
+                message: { type: string }
+      responses:
+        "200":
+          description: Заявка принята
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+
+  /public/applications:
+    post:
+      tags: [Public API]
+      summary: Заявка на доступ к системе
+      operationId: publicApplication
+      security: []
+      x-rate-limit: "10 запросов / 1 час"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ownerName]
+              properties:
+                ownerName: { type: string, example: "Пётр Сидоров" }
+                farmName: { type: string, example: "КФХ Сидорова" }
+                email: { type: string, format: email }
+                phone: { type: string }
+                landArea: { type: string, example: "50 га" }
+                businessScale: { type: string, example: "среднее" }
+                region: { type: string }
+                comment: { type: string }
+      responses:
+        "200":
+          description: Заявка принята
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  status: { type: string, example: "new" }
+                  message: { type: string, example: "Спасибо! Мы свяжемся с вами в ближайшее время." }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: "API-ключ для доступа к защищённым эндпоинтам. Формат: agro_xxxx... (кроме /public/* и /health)"
+
+  schemas:
+    AuthResponse:
+      type: object
+      properties:
+        farmId: { type: integer }
+        name: { type: string }
+        role: { type: string, example: "owner" }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        name: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        role: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Farm:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        region: { type: string }
+        address: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Field:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        name: { type: string }
+        area_hectares: { type: number, format: float }
+        location: { type: string }
+        soil_type: { type: string }
+        status: { type: string, enum: [ready, planted, harvested] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Crop:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        name: { type: string }
+        category: { type: string }
+        default_seed_rate_kg_per_hectare: { type: number, format: float }
+        default_price_per_kg: { type: number, format: float }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    InventoryItem:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        type: { type: string, enum: [seed, harvest, other] }
+        name: { type: string }
+        crop_id: { type: integer, nullable: true }
+        quantity_kg: { type: number, format: float }
+        unit: { type: string }
+        min_quantity_kg: { type: number, format: float }
+        average_cost_per_kg: { type: number, format: float }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Purchase:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        inventory_item_id: { type: integer }
+        supplier_name: { type: string }
+        quantity_kg: { type: number, format: float }
+        price_per_kg: { type: number, format: float }
+        total_amount: { type: number, format: float }
+        purchase_date: { type: string, format: date }
+        created_at: { type: string, format: date-time }
+
+    Planting:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        field_id: { type: integer }
+        crop_id: { type: integer }
+        planting_date: { type: string, format: date }
+        planned_harvest_date: { type: string, format: date, nullable: true }
+        seed_quantity_kg: { type: number, format: float }
+        expected_yield_kg: { type: number, format: float }
+        status: { type: string, enum: [active, harvested] }
+        cost_amount: { type: number, format: float }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        # Дополнительные поля из JOIN при listByFarm
+        field_name: { type: string }
+        crop_name: { type: string }
+
+    Task:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        field_id: { type: integer, nullable: true }
+        planting_id: { type: integer, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [planting, irrigation, fertilizing, pest_control, harvesting, other] }
+        status: { type: string, enum: [todo, in_progress, done] }
+        due_date: { type: string, format: date }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Harvest:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        planting_id: { type: integer }
+        field_id: { type: integer }
+        crop_id: { type: integer }
+        quantity_kg: { type: number, format: float }
+        harvest_date: { type: string, format: date }
+        quality_grade: { type: string }
+        added_to_inventory_item_id: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    Customer:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        name: { type: string }
+        type: { type: string, enum: [restaurant, shop, individual, wholesaler] }
+        phone: { type: string }
+        email: { type: string }
+        address: { type: string }
+        notes: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Sale:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        customer_id: { type: integer }
+        inventory_item_id: { type: integer }
+        crop_id: { type: integer, nullable: true }
+        quantity_kg: { type: number, format: float }
+        price_per_kg: { type: number, format: float }
+        revenue_amount: { type: number, format: float }
+        cost_amount: { type: number, format: float }
+        profit_amount: { type: number, format: float }
+        sale_date: { type: string, format: date }
+        status: { type: string, enum: [pending, paid, cancelled] }
+        created_at: { type: string, format: date-time }
+        customer_name: { type: string }
+        item_name: { type: string }
+
+    ApiKey:
+      type: object
+      properties:
+        id: { type: integer }
+        farm_id: { type: integer }
+        name: { type: string }
+        prefix: { type: string }
+        status: { type: string, enum: [active, revoked] }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    PublicProduct:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        quantity_kg: { type: number, format: float }
+        price_per_kg: { type: number, format: float }
+        unit: { type: string }
