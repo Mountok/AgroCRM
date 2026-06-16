@@ -16,6 +16,7 @@ import (
 	"agrocrm/backend/internal/store"
 
 	"github.com/gin-gonic/gin"
+	"github.com/xuri/excelize/v2"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -57,6 +58,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.POST("/farms/:farmId/inventory", a.createInventory)
 	r.GET("/inventory/:itemId", a.one("SELECT * FROM inventory_items WHERE id=$1", "itemId"))
 	r.PATCH("/inventory/:itemId", a.patchInventory)
+	r.DELETE("/inventory/:itemId", a.delete("inventory_items", "itemId"))
 	r.POST("/inventory/:itemId/adjust", a.adjustInventory)
 	r.GET("/farms/:farmId/inventory/low-stock", a.listByFarm("SELECT * FROM inventory_items WHERE farm_id=$1 AND quantity_kg<=min_quantity_kg ORDER BY quantity_kg"))
 
@@ -76,10 +78,13 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/tasks/:taskId", a.one("SELECT * FROM tasks WHERE id=$1", "taskId"))
 	r.PATCH("/tasks/:taskId", a.patchTask)
 	r.POST("/tasks/:taskId/complete", a.status("tasks", "taskId", "done"))
+	r.DELETE("/tasks/:taskId", a.delete("tasks", "taskId"))
 
 	r.GET("/farms/:farmId/harvests", a.listByFarm("SELECT h.*, c.name crop_name FROM harvests h JOIN crops c ON c.id=h.crop_id WHERE h.farm_id=$1 ORDER BY h.id DESC"))
 	r.POST("/farms/:farmId/harvests", a.createHarvest)
 	r.GET("/harvests/:harvestId", a.one("SELECT h.*, c.name crop_name FROM harvests h JOIN crops c ON c.id=h.crop_id WHERE h.id=$1", "harvestId"))
+	r.PATCH("/harvests/:harvestId", a.patchHarvest)
+	r.DELETE("/harvests/:harvestId", a.deleteHarvest)
 
 	r.GET("/farms/:farmId/customers", a.listByFarm("SELECT * FROM customers WHERE farm_id=$1 ORDER BY id"))
 	r.POST("/farms/:farmId/customers", a.createCustomer)
@@ -91,6 +96,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.POST("/farms/:farmId/sales", a.createSale)
 	r.GET("/sales/:saleId", a.one("SELECT * FROM sales WHERE id=$1", "saleId"))
 	r.PATCH("/sales/:saleId", a.patchSale)
+	r.DELETE("/sales/:saleId", a.deleteSale)
 
 	r.GET("/farms/:farmId/dashboard", a.dashboard)
 	r.GET("/farms/:farmId/analytics/profit-by-crop", a.listByFarm("SELECT c.name crop_name, COALESCE(sum(s.revenue_amount),0) revenue, COALESCE(sum(s.profit_amount),0) profit FROM crops c LEFT JOIN sales s ON s.crop_id=c.id WHERE c.farm_id=$1 GROUP BY c.id,c.name ORDER BY profit DESC"))
@@ -100,6 +106,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/farms/:farmId/api-keys", a.listByFarm("SELECT id,farm_id,name,prefix,status,last_used_at,created_at,revoked_at FROM api_keys WHERE farm_id=$1 ORDER BY id DESC"))
 	r.POST("/farms/:farmId/api-keys", a.createAPIKey)
 	r.PATCH("/api-keys/:apiKeyId/revoke", a.status("api_keys", "apiKeyId", "revoked"))
+	r.POST("/farms/:farmId/import/:kind", a.importXLSX)
 
 	r.GET("/public/products", a.list("SELECT i.id, i.name, i.quantity_kg as available_kg, c.default_price_per_kg as price_per_kg, f.name as farm_name FROM inventory_items i JOIN crops c ON c.id=i.crop_id JOIN farms f ON f.id=i.farm_id WHERE i.type='harvest' AND i.quantity_kg>0 ORDER BY i.id"))
 	r.POST("/public/orders", a.limiter.Middleware(40, time.Hour), a.publicOrder)
@@ -248,9 +255,32 @@ func (a *API) createInventory(c *gin.Context) {
 }
 func (a *API) patchInventory(c *gin.Context) {
 	id, ok := idParam(c, "itemId")
-	if ok {
-		a.exec(c, "UPDATE inventory_items SET name=COALESCE(NULLIF($1,''),name), type=COALESCE(NULLIF($2,''),type), updated_at=now() WHERE id=$3", readText(c, "name"), readText(c, "type"), id)
+	if !ok {
+		return
 	}
+	var in struct {
+		Type, Name, Unit                            string
+		CropID                                      *int `json:"cropId"`
+		QuantityKg, MinQuantityKg, AverageCostPerKg *float64
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	var cropID sql.NullInt64
+	var quantity, minQty, avgCost sql.NullFloat64
+	if in.CropID != nil {
+		cropID = sql.NullInt64{Int64: int64(*in.CropID), Valid: *in.CropID > 0}
+	}
+	if in.QuantityKg != nil {
+		quantity = sql.NullFloat64{Float64: *in.QuantityKg, Valid: true}
+	}
+	if in.MinQuantityKg != nil {
+		minQty = sql.NullFloat64{Float64: *in.MinQuantityKg, Valid: true}
+	}
+	if in.AverageCostPerKg != nil {
+		avgCost = sql.NullFloat64{Float64: *in.AverageCostPerKg, Valid: true}
+	}
+	a.exec(c, "UPDATE inventory_items SET name=COALESCE(NULLIF($1,''),name), type=COALESCE(NULLIF($2,''),type), unit=COALESCE(NULLIF($3,''),unit), crop_id=COALESCE($4,crop_id), quantity_kg=COALESCE($5,quantity_kg), min_quantity_kg=COALESCE($6,min_quantity_kg), average_cost_per_kg=COALESCE($7,average_cost_per_kg), updated_at=now() WHERE id=$8", trim(in.Name, 140), trim(in.Type, 60), trim(in.Unit, 20), cropID, quantity, minQty, avgCost, id)
 }
 func (a *API) adjustInventory(c *gin.Context) {
 	id, ok := idParam(c, "itemId")
@@ -331,9 +361,9 @@ func (a *API) patchPlanting(c *gin.Context) {
 	var in struct {
 		FieldID, CropID                 *int     `json:"fieldID"`
 		SeedQuantityKg, ExpectedYieldKg *float64 `json:"seedQuantityKg"`
-		Status                         string   `json:"status"`
-		PlantingDate                   string   `json:"plantingDate"`
-		PlannedHarvestDate             string   `json:"plannedHarvestDate"`
+		Status                          string   `json:"status"`
+		PlantingDate                    string   `json:"plantingDate"`
+		PlannedHarvestDate              string   `json:"plannedHarvestDate"`
 	}
 	if !httpx.Bind(c, &in) {
 		return
@@ -458,9 +488,24 @@ func (a *API) createTask(c *gin.Context) {
 }
 func (a *API) patchTask(c *gin.Context) {
 	id, ok := idParam(c, "taskId")
-	if ok {
-		a.exec(c, "UPDATE tasks SET title=COALESCE(NULLIF($1,''),title), status=COALESCE(NULLIF($2,''),status), updated_at=now() WHERE id=$3", readText(c, "title"), readText(c, "status"), id)
+	if !ok {
+		return
 	}
+	var in struct {
+		Title, Description, Type, Status, DueDate string
+		FieldID, PlantingID                       *int `json:"fieldID"`
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	fieldID, plantingID := sql.NullInt64{}, sql.NullInt64{}
+	if in.FieldID != nil {
+		fieldID = sql.NullInt64{Int64: int64(*in.FieldID), Valid: *in.FieldID > 0}
+	}
+	if in.PlantingID != nil {
+		plantingID = sql.NullInt64{Int64: int64(*in.PlantingID), Valid: *in.PlantingID > 0}
+	}
+	a.exec(c, "UPDATE tasks SET title=COALESCE(NULLIF($1,''),title), description=COALESCE(NULLIF($2,''),description), type=COALESCE(NULLIF($3,''),type), status=COALESCE(NULLIF($4,''),status), due_date=COALESCE(NULLIF($5,'')::date,due_date), field_id=COALESCE($6,field_id), planting_id=COALESCE($7,planting_id), updated_at=now() WHERE id=$8", trim(in.Title, 180), trim(in.Description, 1000), trim(in.Type, 80), trim(in.Status, 40), trim(in.DueDate, 20), fieldID, plantingID, id)
 }
 
 func (a *API) createHarvest(c *gin.Context) {
@@ -495,6 +540,47 @@ func (a *API) createHarvest(c *gin.Context) {
 	tx.Commit()
 	c.JSON(201, gin.H{"id": id, "inventoryItemId": itemID})
 }
+func (a *API) patchHarvest(c *gin.Context) {
+	id, ok := idParam(c, "harvestId")
+	if !ok {
+		return
+	}
+	var in struct {
+		QualityGrade string
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	a.exec(c, "UPDATE harvests SET quality_grade=COALESCE(NULLIF($1,''),quality_grade) WHERE id=$2", trim(in.QualityGrade, 80), id)
+}
+func (a *API) deleteHarvest(c *gin.Context) {
+	id, ok := idParam(c, "harvestId")
+	if !ok {
+		return
+	}
+	tx, _ := a.store.DB.Begin()
+	defer tx.Rollback()
+	var itemID int
+	var qty float64
+	if err := tx.QueryRow("SELECT added_to_inventory_item_id,quantity_kg FROM harvests WHERE id=$1 FOR UPDATE", id).Scan(&itemID, &qty); err != nil {
+		if err == sql.ErrNoRows {
+			httpx.Error(c, 404, "NOT_FOUND", "Урожай не найден")
+		} else {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка базы данных")
+		}
+		return
+	}
+	if _, err := tx.Exec("UPDATE inventory_items SET quantity_kg=GREATEST(quantity_kg-$1,0), updated_at=now() WHERE id=$2", qty, itemID); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка отката склада")
+		return
+	}
+	if _, err := tx.Exec("DELETE FROM harvests WHERE id=$1", id); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка удаления урожая")
+		return
+	}
+	tx.Commit()
+	c.JSON(200, gin.H{"ok": true})
+}
 
 func (a *API) createCustomer(c *gin.Context) {
 	var in struct{ Name, Phone, Type, Email, Address, Notes string }
@@ -510,9 +596,14 @@ func (a *API) createCustomer(c *gin.Context) {
 }
 func (a *API) patchCustomer(c *gin.Context) {
 	id, ok := idParam(c, "customerId")
-	if ok {
-		a.exec(c, "UPDATE customers SET name=COALESCE(NULLIF($1,''),name), phone=COALESCE(NULLIF($2,''),phone), updated_at=now() WHERE id=$3", readText(c, "name"), readText(c, "phone"), id)
+	if !ok {
+		return
 	}
+	var in struct{ Name, Phone, Type, Email, Address, Notes string }
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	a.exec(c, "UPDATE customers SET name=COALESCE(NULLIF($1,''),name), phone=COALESCE(NULLIF($2,''),phone), type=COALESCE(NULLIF($3,''),type), email=COALESCE(NULLIF($4,''),email), address=COALESCE(NULLIF($5,''),address), notes=COALESCE(NULLIF($6,''),notes), updated_at=now() WHERE id=$7", trim(in.Name, 160), trim(in.Phone, 40), trim(in.Type, 40), trim(in.Email, 160), trim(in.Address, 220), trim(in.Notes, 500), id)
 }
 func (a *API) createSale(c *gin.Context) {
 	var in struct {
@@ -546,9 +637,119 @@ func (a *API) createSale(c *gin.Context) {
 }
 func (a *API) patchSale(c *gin.Context) {
 	id, ok := idParam(c, "saleId")
-	if ok {
-		a.exec(c, "UPDATE sales SET status=COALESCE(NULLIF($1,''),status) WHERE id=$2", readText(c, "status"), id)
+	if !ok {
+		return
 	}
+	var in struct {
+		Status string
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	a.exec(c, "UPDATE sales SET status=COALESCE(NULLIF($1,''),status) WHERE id=$2", trim(in.Status, 40), id)
+}
+func (a *API) deleteSale(c *gin.Context) {
+	id, ok := idParam(c, "saleId")
+	if !ok {
+		return
+	}
+	tx, _ := a.store.DB.Begin()
+	defer tx.Rollback()
+	var inventoryItemID int
+	var qty float64
+	if err := tx.QueryRow("SELECT inventory_item_id,quantity_kg FROM sales WHERE id=$1 FOR UPDATE", id).Scan(&inventoryItemID, &qty); err != nil {
+		if err == sql.ErrNoRows {
+			httpx.Error(c, 404, "NOT_FOUND", "Продажа не найдена")
+		} else {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка базы данных")
+		}
+		return
+	}
+	if _, err := tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg+$1, updated_at=now() WHERE id=$2", qty, inventoryItemID); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка возврата товара на склад")
+		return
+	}
+	if _, err := tx.Exec("DELETE FROM sales WHERE id=$1", id); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка удаления продажи")
+		return
+	}
+	tx.Commit()
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (a *API) importXLSX(c *gin.Context) {
+	file, err := c.FormFile("file")
+	if err != nil {
+		httpx.Error(c, 400, "FILE_REQUIRED", "Нужно приложить XLSX файл")
+		return
+	}
+	src, err := file.Open()
+	if err != nil {
+		httpx.Error(c, 400, "FILE_ERROR", "Не удалось открыть файл")
+		return
+	}
+	defer src.Close()
+	wb, err := excelize.OpenReader(src)
+	if err != nil {
+		httpx.Error(c, 400, "INVALID_XLSX", "Не удалось прочитать XLSX файл")
+		return
+	}
+	defer wb.Close()
+	sheets := wb.GetSheetList()
+	if len(sheets) == 0 {
+		httpx.Error(c, 400, "EMPTY_XLSX", "В файле нет листов")
+		return
+	}
+	rows, err := wb.GetRows(sheets[0])
+	if err != nil || len(rows) < 2 {
+		httpx.Error(c, 400, "EMPTY_XLSX", "В файле нет данных")
+		return
+	}
+	headers := map[string]int{}
+	for i, cell := range rows[0] {
+		headers[normalizeHeader(cell)] = i
+	}
+	tx, _ := a.store.DB.Begin()
+	defer tx.Rollback()
+	created := 0
+	for _, row := range rows[1:] {
+		if isRowEmpty(row) {
+			continue
+		}
+		switch c.Param("kind") {
+		case "inventory":
+			_, err = tx.Exec("INSERT INTO inventory_items(farm_id,type,name,crop_id,quantity_kg,unit,min_quantity_kg,average_cost_per_kg) VALUES($1,$2,$3,NULLIF($4,0),$5,$6,$7,$8)", c.Param("farmId"), rowValue(row, headers, "type", "тип"), rowValue(row, headers, "name", "название"), atoi(rowValue(row, headers, "cropid", "crop_id")), atof(rowValue(row, headers, "quantitykg", "quantity_kg", "количество")), value(rowValue(row, headers, "unit", "ед"), "кг"), atof(rowValue(row, headers, "minquantitykg", "min_quantity_kg", "минимум")), atof(rowValue(row, headers, "averagecostperkg", "average_cost_per_kg", "цена")))
+		case "plantings":
+			cropID := atoi(rowValue(row, headers, "cropid", "crop_id"))
+			fieldID := atoi(rowValue(row, headers, "fieldid", "field_id"))
+			seedQty := atof(rowValue(row, headers, "seedquantitykg", "seed_quantity_kg", "семена"))
+			expected := atof(rowValue(row, headers, "expectedyieldkg", "expected_yield_kg", "урожай"))
+			status := value(rowValue(row, headers, "status", "статус"), "active")
+			var itemID int
+			var qty float64
+			if err = tx.QueryRow("SELECT id,quantity_kg FROM inventory_items WHERE farm_id=$1 AND crop_id=$2 AND type='seed' LIMIT 1 FOR UPDATE", c.Param("farmId"), cropID).Scan(&itemID, &qty); err != nil || qty < seedQty {
+				httpx.Error(c, 409, "INSUFFICIENT_SEED", "Недостаточно семян для импорта посевов")
+				return
+			}
+			if _, err = tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg-$1, updated_at=now() WHERE id=$2", seedQty, itemID); err == nil {
+				_, err = tx.Exec("INSERT INTO plantings(farm_id,field_id,crop_id,planting_date,planned_harvest_date,seed_quantity_kg,expected_yield_kg,status,cost_amount) VALUES($1,$2,$3,COALESCE(NULLIF($4,'')::date,current_date),NULLIF($5,'')::date,$6,$7,$8,$9)", c.Param("farmId"), fieldID, cropID, rowValue(row, headers, "plantingdate", "planting_date"), rowValue(row, headers, "plannedharvestdate", "planned_harvest_date"), seedQty, expected, status, seedQty*18)
+			}
+		case "customers":
+			_, err = tx.Exec("INSERT INTO customers(farm_id,name,type,phone,email,address,notes) VALUES($1,$2,$3,$4,$5,$6,$7)", c.Param("farmId"), rowValue(row, headers, "name", "имя"), value(rowValue(row, headers, "type", "тип"), "restaurant"), rowValue(row, headers, "phone", "телефон"), rowValue(row, headers, "email", "почта"), rowValue(row, headers, "address", "адрес"), rowValue(row, headers, "notes", "заметки"))
+		case "fields":
+			_, err = tx.Exec("INSERT INTO fields(farm_id,name,area_hectares,location,soil_type,status) VALUES($1,$2,$3,$4,$5,$6)", c.Param("farmId"), rowValue(row, headers, "name", "название"), atof(rowValue(row, headers, "areahectares", "area_hectares", "площадь")), rowValue(row, headers, "location", "локация"), rowValue(row, headers, "soiltype", "soil_type", "почва"), value(rowValue(row, headers, "status", "статус"), "ready"))
+		default:
+			httpx.Error(c, 400, "UNSUPPORTED_IMPORT", "Импорт для этого раздела пока не поддерживается")
+			return
+		}
+		if err != nil {
+			httpx.Error(c, 500, "IMPORT_ERROR", "Ошибка импорта данных")
+			return
+		}
+		created++
+	}
+	tx.Commit()
+	c.JSON(200, gin.H{"ok": true, "created": created})
 }
 
 func (a *API) dashboard(c *gin.Context) {
@@ -713,6 +914,37 @@ func (a *API) exec(c *gin.Context, query string, args ...any) {
 		return
 	}
 	c.JSON(200, gin.H{"ok": true})
+}
+
+func normalizeHeader(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	replacer := strings.NewReplacer(" ", "", "_", "", "-", "", "№", "", ".", "", "(", "", ")", "")
+	return replacer.Replace(s)
+}
+func rowValue(row []string, headers map[string]int, keys ...string) string {
+	for _, key := range keys {
+		if idx, ok := headers[normalizeHeader(key)]; ok && idx < len(row) {
+			return strings.TrimSpace(row[idx])
+		}
+	}
+	return ""
+}
+func isRowEmpty(row []string) bool {
+	for _, cell := range row {
+		if strings.TrimSpace(cell) != "" {
+			return false
+		}
+	}
+	return true
+}
+func atoi(s string) int {
+	v, _ := strconv.Atoi(strings.TrimSpace(s))
+	return v
+}
+func atof(s string) float64 {
+	s = strings.ReplaceAll(strings.TrimSpace(s), ",", ".")
+	v, _ := strconv.ParseFloat(s, 64)
+	return v
 }
 
 func createdID(c *gin.Context, row *sql.Row) {
