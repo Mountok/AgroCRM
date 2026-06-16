@@ -1,13 +1,16 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +39,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/auth/me", func(c *gin.Context) {
 		c.JSON(200, gin.H{"farmId": 1, "name": "Ахмат Исаев", "role": "owner"})
 	})
+	r.PATCH("/auth/me", a.patchMe)
 
 	r.GET("/farms", a.list("SELECT id,name,region,address,created_at,updated_at FROM farms ORDER BY id"))
 	r.POST("/farms", a.createFarm)
@@ -99,6 +103,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.DELETE("/sales/:saleId", a.deleteSale)
 
 	r.GET("/farms/:farmId/dashboard", a.dashboard)
+	r.GET("/farms/:farmId/export/:kind", a.exportXLSX)
 	r.GET("/farms/:farmId/analytics/profit-by-crop", a.listByFarm("SELECT c.name crop_name, COALESCE(sum(s.revenue_amount),0) revenue, COALESCE(sum(s.profit_amount),0) profit FROM crops c LEFT JOIN sales s ON s.crop_id=c.id WHERE c.farm_id=$1 GROUP BY c.id,c.name ORDER BY profit DESC"))
 	r.GET("/farms/:farmId/analytics/inventory-summary", a.listByFarm("SELECT type, COALESCE(sum(quantity_kg),0) quantity_kg, count(*) items FROM inventory_items WHERE farm_id=$1 GROUP BY type ORDER BY type"))
 	r.GET("/farms/:farmId/analytics/upcoming-tasks", a.listByFarm("SELECT * FROM tasks WHERE farm_id=$1 AND status<>'done' ORDER BY due_date,id LIMIT 10"))
@@ -156,6 +161,20 @@ func (a *API) login(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"farmId": farmID, "name": name, "role": role})
+}
+
+func (a *API) patchMe(c *gin.Context) {
+	var in struct {
+		FarmID             int `json:"farmId"`
+		Name, Email, Phone string
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	if in.FarmID <= 0 {
+		in.FarmID = 1
+	}
+	a.exec(c, "UPDATE users SET name=COALESCE(NULLIF($1,''),name), email=COALESCE(NULLIF($2,''),email), phone=COALESCE(NULLIF($3,''),phone), updated_at=now() WHERE id=(SELECT id FROM users WHERE farm_id=$4 ORDER BY id LIMIT 1)", trim(in.Name, 120), trim(in.Email, 160), trim(in.Phone, 40), in.FarmID)
 }
 
 func (a *API) createFarm(c *gin.Context) {
@@ -760,6 +779,67 @@ func (a *API) dashboard(c *gin.Context) {
 	a.store.DB.QueryRow("SELECT COALESCE(sum(quantity_kg),0) FROM inventory_items WHERE farm_id=$1 AND type='seed'", farmID).Scan(&seed)
 	c.JSON(200, gin.H{"revenue": revenue, "profit": profit, "harvestKg": harvest, "seedKg": seed})
 }
+
+func (a *API) exportXLSX(c *gin.Context) {
+	kind := c.Param("kind")
+	query, filename := exportQuery(kind)
+	if query == "" {
+		httpx.Error(c, 400, "UNSUPPORTED_EXPORT", "Экспорт для этого раздела не поддерживается")
+		return
+	}
+	rows, err := a.store.Rows(query, c.Param("farmId"))
+	if err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка подготовки экспорта")
+		return
+	}
+	wb := excelize.NewFile()
+	sheet := wb.GetSheetName(0)
+	if len(rows) > 0 {
+		headers := sortedKeys(rows[0])
+		for i, header := range headers {
+			cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+			wb.SetCellValue(sheet, cell, header)
+		}
+		for rowIndex, row := range rows {
+			for colIndex, header := range headers {
+				cell, _ := excelize.CoordinatesToCellName(colIndex+1, rowIndex+2)
+				wb.SetCellValue(sheet, cell, stringify(row[header]))
+			}
+		}
+	}
+	buf := &bytes.Buffer{}
+	if err := wb.Write(buf); err != nil {
+		httpx.Error(c, 500, "EXPORT_ERROR", "Ошибка формирования XLSX")
+		return
+	}
+	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+	c.Data(200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", buf.Bytes())
+}
+
+func exportQuery(kind string) (string, string) {
+	switch kind {
+	case "fields":
+		return "SELECT id,name,area_hectares,location,soil_type,status,created_at,updated_at FROM fields WHERE farm_id=$1 ORDER BY id", "fields.xlsx"
+	case "inventory":
+		return "SELECT id,type,name,crop_id,quantity_kg,unit,min_quantity_kg,average_cost_per_kg,created_at,updated_at FROM inventory_items WHERE farm_id=$1 ORDER BY id", "inventory.xlsx"
+	case "plantings":
+		return "SELECT p.id,c.name crop_name,f.name field_name,p.planting_date,p.planned_harvest_date,p.seed_quantity_kg,p.expected_yield_kg,p.status,p.created_at,p.updated_at FROM plantings p JOIN crops c ON c.id=p.crop_id JOIN fields f ON f.id=p.field_id WHERE p.farm_id=$1 ORDER BY p.id DESC", "plantings.xlsx"
+	case "tasks":
+		return "SELECT id,title,description,type,status,due_date,field_id,planting_id,created_at,updated_at FROM tasks WHERE farm_id=$1 ORDER BY due_date,id", "tasks.xlsx"
+	case "harvests":
+		return "SELECT h.id,c.name crop_name,h.planting_id,h.field_id,h.quantity_kg,h.harvest_date,h.quality_grade,h.added_to_inventory_item_id,h.created_at FROM harvests h JOIN crops c ON c.id=h.crop_id WHERE h.farm_id=$1 ORDER BY h.id DESC", "harvests.xlsx"
+	case "customers":
+		return "SELECT id,name,type,phone,email,address,notes,created_at,updated_at FROM customers WHERE farm_id=$1 ORDER BY id", "customers.xlsx"
+	case "sales":
+		return "SELECT s.id,s.sale_date,c.name customer_name,i.name item_name,s.quantity_kg,s.price_per_kg,s.revenue_amount,s.cost_amount,s.profit_amount,s.status,s.created_at FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN inventory_items i ON i.id=s.inventory_item_id WHERE s.farm_id=$1 ORDER BY s.id DESC", "sales.xlsx"
+	case "analytics":
+		return "SELECT c.name crop_name, COALESCE(sum(s.revenue_amount),0) revenue, COALESCE(sum(s.profit_amount),0) profit FROM crops c LEFT JOIN sales s ON s.crop_id=c.id WHERE c.farm_id=$1 GROUP BY c.id,c.name ORDER BY profit DESC", "analytics.xlsx"
+	default:
+		return "", ""
+	}
+}
+
 func (a *API) createAPIKey(c *gin.Context) {
 	var in struct{ Name string }
 	if !httpx.Bind(c, &in) {
@@ -945,6 +1025,24 @@ func atof(s string) float64 {
 	s = strings.ReplaceAll(strings.TrimSpace(s), ",", ".")
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
+}
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+func stringify(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case time.Time:
+		return x.Format(time.RFC3339)
+	default:
+		return fmt.Sprint(x)
+	}
 }
 
 func createdID(c *gin.Context, row *sql.Row) {
