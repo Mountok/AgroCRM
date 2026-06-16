@@ -7,9 +7,14 @@ import (
 )
 
 type Config struct {
-	DatabaseURL    string
-	Port           string
-	AllowedOrigins []string
+	DatabaseURL       string
+	Port              string
+	AllowedOrigins    []string
+	SMTPHost          string
+	SMTPPort          string
+	SMTPUser          string
+	SMTPPassword      string
+	ApplicationsEmail string
 }
 
 func (c Config) IsAllowedOrigin(origin string) bool {
@@ -31,9 +36,14 @@ func (c Config) IsAllowedOrigin(origin string) bool {
 
 func Load() Config {
 	return Config{
-		DatabaseURL:    env("DATABASE_URL", "postgres://agrocrm:agrocrm@localhost:5432/agrocrm?sslmode=disable"),
-		Port:           env("PORT", "8080"),
-		AllowedOrigins: origins(env("FRONTEND_ORIGIN", "http://localhost:5173,http://127.0.0.1:5173,http://0.0.0.0:5173")),
+		DatabaseURL:       env("DATABASE_URL", "postgres://agrocrm:agrocrm@localhost:5432/agrocrm?sslmode=disable"),
+		Port:              env("PORT", "8080"),
+		AllowedOrigins:    origins(env("FRONTEND_ORIGIN", "http://localhost:5173,http://127.0.0.1:5173,http://0.0.0.0:5173")),
+		SMTPHost:          env("SMTP_HOST", "smtp.gmail.com"),
+		SMTPPort:          env("SMTP_PORT", "587"),
+		SMTPUser:          env("SMTP_USER", "themountok@gmail.com"),
+		SMTPPassword:      env("SMTP_PASSWORD", ""),
+		ApplicationsEmail: env("APPLICATIONS_EMAIL", "themountok@gmail.com"),
 	}
 }
 

@@ -1436,6 +1436,102 @@ paths:
                 properties:
                   imported: { type: integer, description: "Количество импортированных записей" }
 
+
+  # ─── Admin ──────────────────────────────────────────
+  /admin/summary:
+    get:
+      tags: [Admin]
+      summary: Сводка по заявкам, лидам и заказам
+      operationId: adminSummary
+      responses:
+        "200":
+          description: Сводные счётчики админки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applications: { type: integer }
+                  leads: { type: integer }
+                  orders: { type: integer }
+                  newApplications: { type: integer }
+                  newLeads: { type: integer }
+                  newOrders: { type: integer }
+
+  /admin/applications:
+    get:
+      tags: [Admin]
+      summary: Список заявок на доступ
+      operationId: adminApplications
+      responses:
+        "200":
+          description: Заявки на доступ
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /admin/applications/{applicationId}:
+    patch:
+      tags: [Admin]
+      summary: Обновить статус заявки на доступ
+      operationId: adminPatchApplication
+      parameters:
+        - name: applicationId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [new, in_progress, approved, done, rejected, cancelled] }
+      responses:
+        "200": { description: Статус обновлён }
+
+  /admin/orders:
+    get:
+      tags: [Admin]
+      summary: Список лидов и публичных заказов
+      operationId: adminOrders
+      responses:
+        "200":
+          description: Лиды и заказы
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /admin/orders/{orderId}:
+    patch:
+      tags: [Admin]
+      summary: Обновить статус лида или заказа
+      operationId: adminPatchOrder
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [new, in_progress, approved, done, rejected, cancelled] }
+      responses:
+        "200": { description: Статус обновлён }
+
   # ─── Public API ─────────────────────────────────────
   /public/products:
     get:
@@ -1487,7 +1583,7 @@ paths:
                       productId: { type: integer, example: 1 }
                       quantityKg: { type: number, format: float, example: 100 }
       responses:
-        "200":
+        "201":
           description: Заказ создан
           content:
             application/json:
@@ -1497,6 +1593,7 @@ paths:
                   id: { type: integer }
                   status: { type: string, example: "new" }
                   estimatedAmount: { type: number, format: float }
+                  emailSent: { type: boolean, description: "true если email-уведомление отправлено" }
 
   /public/leads:
     post:
@@ -1511,21 +1608,23 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
+              required: [name, phone]
               properties:
                 name: { type: string, example: "Сергей Иванов" }
                 phone: { type: string }
                 email: { type: string, format: email }
                 message: { type: string }
       responses:
-        "200":
+        "201":
           description: Заявка принята
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  status: { type: string, example: "ok" }
+                  id: { type: integer }
+                  status: { type: string, example: "new" }
+                  emailSent: { type: boolean, description: "true если email-уведомление отправлено" }
 
   /public/applications:
     post:
@@ -1540,7 +1639,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [ownerName]
+              required: [ownerName, phone]
               properties:
                 ownerName: { type: string, example: "Пётр Сидоров" }
                 farmName: { type: string, example: "КФХ Сидорова" }
@@ -1551,7 +1650,7 @@ paths:
                 region: { type: string }
                 comment: { type: string }
       responses:
-        "200":
+        "201":
           description: Заявка принята
           content:
             application/json:
@@ -1561,6 +1660,7 @@ paths:
                   id: { type: integer }
                   status: { type: string, example: "new" }
                   message: { type: string, example: "Спасибо! Мы свяжемся с вами в ближайшее время." }
+                  emailSent: { type: boolean, description: "true если email-уведомление отправлено" }
 
 components:
   securitySchemes:

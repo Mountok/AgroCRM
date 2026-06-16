@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"agrocrm/backend/internal/httpx"
+	"agrocrm/backend/internal/mailer"
 	"agrocrm/backend/internal/store"
 
 	"github.com/gin-gonic/gin"
@@ -26,10 +28,11 @@ import (
 type API struct {
 	store   *store.Store
 	limiter *httpx.Limiter
+	mailer  *mailer.Client
 }
 
-func New(store *store.Store, limiter *httpx.Limiter) *API {
-	return &API{store: store, limiter: limiter}
+func New(store *store.Store, limiter *httpx.Limiter, mailer *mailer.Client) *API {
+	return &API{store: store, limiter: limiter, mailer: mailer}
 }
 
 func (a *API) RegisterRoutes(r *gin.Engine) {
@@ -115,6 +118,11 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.POST("/farms/:farmId/api-keys", a.createAPIKey)
 	r.PATCH("/api-keys/:apiKeyId/revoke", a.status("api_keys", "apiKeyId", "revoked"))
 	r.POST("/farms/:farmId/import/:kind", a.importXLSX)
+	r.GET("/admin/summary", a.adminSummary)
+	r.GET("/admin/applications", a.adminApplications)
+	r.PATCH("/admin/applications/:applicationId", a.adminPatchApplication)
+	r.GET("/admin/orders", a.adminOrders)
+	r.PATCH("/admin/orders/:orderId", a.adminPatchOrder)
 
 	r.GET("/public/products", a.list("SELECT i.id, i.name, i.quantity_kg as available_kg, c.default_price_per_kg as price_per_kg, f.name as farm_name FROM inventory_items i JOIN crops c ON c.id=i.crop_id JOIN farms f ON f.id=i.farm_id WHERE i.type='harvest' AND i.quantity_kg>0 ORDER BY i.id"))
 	r.POST("/public/orders", a.limiter.Middleware(40, time.Hour), a.publicOrder)
@@ -155,6 +163,9 @@ func (a *API) login(c *gin.Context) {
 	if in.Email == "demo" && in.Password == "demo" {
 		c.JSON(200, gin.H{"farmId": 1, "name": "Демо", "role": "owner"})
 		return
+	}
+	if strings.ToLower(trim(in.Email, 160)) == "admin" {
+		in.Email = "admin@agrocrm.local"
 	}
 	var farmID int
 	var name, role, hash string
@@ -935,7 +946,17 @@ func (a *API) publicOrder(c *gin.Context) {
 		httpx.Error(c, 500, "DB_ERROR", "Ошибка заказа")
 		return
 	}
-	c.JSON(201, gin.H{"id": id, "status": "new", "estimatedAmount": amount})
+	emailSent := a.notifyEmail("AgroCRM: новый публичный заказ", []string{
+		fmt.Sprintf("ID заказа: %d", id),
+		"Тип: публичный заказ",
+		"Клиент: " + trim(in.CustomerName, 160),
+		"Телефон: " + trim(in.Phone, 40),
+		"Email: " + trim(in.Email, 160),
+		fmt.Sprintf("Общий вес: %.2f кг", totalQty),
+		fmt.Sprintf("Оценочная сумма: %.2f ₽", amount),
+		"Позиции: " + string(b),
+	})
+	c.JSON(201, gin.H{"id": id, "status": "new", "estimatedAmount": amount, "emailSent": emailSent})
 }
 func (a *API) publicLead(c *gin.Context) {
 	var in struct{ Name, Phone, Email, Message string }
@@ -948,7 +969,20 @@ func (a *API) publicLead(c *gin.Context) {
 	}
 	payload, _ := json.Marshal([]map[string]string{{"message": trim(in.Message, 1000)}})
 	row := a.store.DB.QueryRow("INSERT INTO external_orders(farm_id,customer_name,phone,email,source,items_json,status) VALUES((SELECT id FROM farms ORDER BY id LIMIT 1),$1,$2,$3,'lead',$4,'new') RETURNING id", trim(in.Name, 160), trim(in.Phone, 40), trim(in.Email, 160), string(payload))
-	createdID(c, row)
+	var id int
+	if err := row.Scan(&id); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка заявки")
+		return
+	}
+	emailSent := a.notifyEmail("AgroCRM: новый лид", []string{
+		fmt.Sprintf("ID лида: %d", id),
+		"Тип: публичный лид",
+		"Имя: " + trim(in.Name, 160),
+		"Телефон: " + trim(in.Phone, 40),
+		"Email: " + trim(in.Email, 160),
+		"Сообщение: " + trim(in.Message, 1000),
+	})
+	c.JSON(http.StatusCreated, gin.H{"id": id, "status": "new", "emailSent": emailSent})
 }
 func (a *API) publicApplication(c *gin.Context) {
 	var in struct{ OwnerName, FarmName, Email, Phone, LandArea, BusinessScale, Region, Comment string }
@@ -965,7 +999,115 @@ func (a *API) publicApplication(c *gin.Context) {
 		httpx.Error(c, 500, "DB_ERROR", "Ошибка заявки")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"id": id, "status": "new", "message": "Заявка принята. Мы свяжемся с вами и выдадим доступ."})
+	emailSent := a.notifyEmail("AgroCRM: новая заявка на доступ", []string{
+		fmt.Sprintf("ID заявки: %d", id),
+		"Тип: заявка на доступ",
+		"ФИО: " + trim(in.OwnerName, 160),
+		"Название фермы: " + trim(in.FarmName, 160),
+		"Email: " + trim(in.Email, 160),
+		"Телефон: " + trim(in.Phone, 40),
+		"Площадь земли: " + trim(in.LandArea, 80),
+		"Масштаб бизнеса: " + trim(in.BusinessScale, 80),
+		"Регион: " + trim(in.Region, 120),
+		"Комментарий: " + trim(in.Comment, 1000),
+	})
+	c.JSON(http.StatusCreated, gin.H{"id": id, "status": "new", "message": "Заявка принята. Мы свяжемся с вами и выдадим доступ.", "emailSent": emailSent})
+}
+
+func (a *API) notifyEmail(subject string, lines []string) bool {
+	if a.mailer == nil || !a.mailer.Enabled() {
+		return false
+	}
+	clean := []string{"Новая заявка из AgroCRM", ""}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			clean = append(clean, line)
+		}
+	}
+	clean = append(clean, "", "Откройте AgroCRM, чтобы обработать заявку.")
+	if err := a.mailer.Send(subject, strings.Join(clean, "\n")); err != nil {
+		log.Printf("email notification failed: %v", err)
+		return false
+	}
+	return true
+}
+
+func (a *API) adminSummary(c *gin.Context) {
+	var applications, leads, orders, newApplications, newLeads, newOrders int
+	_ = a.store.DB.QueryRow("SELECT count(*) FROM access_applications").Scan(&applications)
+	_ = a.store.DB.QueryRow("SELECT count(*) FROM external_orders WHERE source='lead'").Scan(&leads)
+	_ = a.store.DB.QueryRow("SELECT count(*) FROM external_orders WHERE source<>'lead'").Scan(&orders)
+	_ = a.store.DB.QueryRow("SELECT count(*) FROM access_applications WHERE status='new'").Scan(&newApplications)
+	_ = a.store.DB.QueryRow("SELECT count(*) FROM external_orders WHERE source='lead' AND status='new'").Scan(&newLeads)
+	_ = a.store.DB.QueryRow("SELECT count(*) FROM external_orders WHERE source<>'lead' AND status='new'").Scan(&newOrders)
+	c.JSON(http.StatusOK, gin.H{
+		"applications":    applications,
+		"leads":           leads,
+		"orders":          orders,
+		"newApplications": newApplications,
+		"newLeads":        newLeads,
+		"newOrders":       newOrders,
+	})
+}
+
+func (a *API) adminApplications(c *gin.Context) {
+	items, err := a.store.Rows("SELECT id,owner_name,farm_name,email,phone,land_area,business_scale,region,comment,status,created_at,updated_at FROM access_applications ORDER BY created_at DESC, id DESC")
+	if err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка загрузки заявок")
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func (a *API) adminOrders(c *gin.Context) {
+	items, err := a.store.Rows("SELECT id,farm_id,customer_name,phone,email,source,status,items_json,total_quantity_kg,estimated_amount,created_at,updated_at FROM external_orders ORDER BY created_at DESC, id DESC")
+	if err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка загрузки обращений")
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func (a *API) adminPatchApplication(c *gin.Context) {
+	var in struct{ Status string }
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	status := adminStatus(in.Status)
+	if status == "" {
+		httpx.Error(c, 422, "VALIDATION_ERROR", "Некорректный статус")
+		return
+	}
+	id, ok := idParam(c, "applicationId")
+	if ok {
+		a.exec(c, "UPDATE access_applications SET status=$1, updated_at=now() WHERE id=$2", status, id)
+	}
+}
+
+func (a *API) adminPatchOrder(c *gin.Context) {
+	var in struct{ Status string }
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	status := adminStatus(in.Status)
+	if status == "" {
+		httpx.Error(c, 422, "VALIDATION_ERROR", "Некорректный статус")
+		return
+	}
+	id, ok := idParam(c, "orderId")
+	if ok {
+		a.exec(c, "UPDATE external_orders SET status=$1, updated_at=now() WHERE id=$2", status, id)
+	}
+}
+
+func adminStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "new", "in_progress", "approved", "done", "rejected", "cancelled":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
 }
 
 func (a *API) list(query string) gin.HandlerFunc {

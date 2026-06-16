@@ -53,6 +53,12 @@ VALUES($1,$2,$3,$4,$5,'owner')
 ON CONFLICT (email) DO UPDATE SET farm_id=EXCLUDED.farm_id, name=EXCLUDED.name, phone=EXCLUDED.phone, password_hash=EXCLUDED.password_hash, role='owner'`, farmID, "Ахмат Исаев", "akhmat@example.com", "+7 (928) 123-45-67", string(hash)); err != nil {
 		return err
 	}
+	adminHash, _ := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+	if _, err := s.DB.Exec(`INSERT INTO users(farm_id,name,email,phone,password_hash,role)
+VALUES($1,$2,$3,$4,$5,'admin')
+ON CONFLICT (email) DO UPDATE SET farm_id=EXCLUDED.farm_id, name=EXCLUDED.name, phone=EXCLUDED.phone, password_hash=EXCLUDED.password_hash, role='admin'`, farmID, "Администратор AgroCRM", "admin@agrocrm.local", "", string(adminHash)); err != nil {
+		return err
+	}
 	_, _ = s.DB.Exec(`INSERT INTO fields(farm_id,name,area_hectares,location,soil_type,status)
 SELECT $1,$2,$3,$4,$5,'ready' WHERE NOT EXISTS (SELECT 1 FROM fields WHERE farm_id=$1 AND name=$2)`, farmID, "Поле №1", 2, "Грозненский район", "чернозём")
 	if err := s.DB.QueryRow("SELECT id FROM crops WHERE farm_id=$1 AND name=$2 LIMIT 1", farmID, "Картофель").Scan(&cropID); err == sql.ErrNoRows {
@@ -110,6 +116,7 @@ ALTER TABLE farms ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT now();
 CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), name TEXT NOT NULL DEFAULT '', email TEXT UNIQUE NOT NULL, phone TEXT DEFAULT '', password_hash TEXT DEFAULT '', role TEXT DEFAULT 'owner', created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP DEFAULT now());
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'owner';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT now();
 CREATE TABLE IF NOT EXISTS fields(id SERIAL PRIMARY KEY, farm_id INT REFERENCES farms(id), name TEXT NOT NULL, area_hectares NUMERIC DEFAULT 0, location TEXT DEFAULT '', soil_type TEXT DEFAULT '', status TEXT DEFAULT 'ready', created_at TIMESTAMP DEFAULT now(), updated_at TIMESTAMP DEFAULT now());
 ALTER TABLE fields ADD COLUMN IF NOT EXISTS soil_type TEXT DEFAULT '';
@@ -157,4 +164,5 @@ ALTER TABLE external_orders ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'public
 ALTER TABLE external_orders ADD COLUMN IF NOT EXISTS total_quantity_kg NUMERIC DEFAULT 0;
 ALTER TABLE external_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT now();
 CREATE TABLE IF NOT EXISTS access_applications(id SERIAL PRIMARY KEY, owner_name TEXT NOT NULL, farm_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT '', land_area TEXT DEFAULT '', business_scale TEXT DEFAULT '', region TEXT DEFAULT '', comment TEXT DEFAULT '', status TEXT DEFAULT 'new', created_at TIMESTAMP DEFAULT now());
+ALTER TABLE access_applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT now();
 `

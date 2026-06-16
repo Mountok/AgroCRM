@@ -7,6 +7,7 @@ import {MdInventory2, MdOutlineApi, MdOutlineSell, MdWarningAmber, MdWaterDrop, 
 import './style.css';
 import './analytics.css';
 import './auth.css';
+import './admin.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 async function api(path, opts = {}) {
@@ -146,7 +147,7 @@ function App() {
     try { out.weather = await fetchWeatherForFarm(out.farm); } catch { out.weather = null; }
     setData(out);
   };
-  useEffect(() => { if (sessionData) load().catch(e => setMsg(e.message)); }, [activeFarmId, sessionData]);
+  useEffect(() => { if (sessionData && sessionData.role !== 'admin') load().catch(e => setMsg(e.message)); }, [activeFarmId, sessionData]);
   const crop = data.crops?.[0], field = data.fields?.[0], harvestItem = data.inventory?.find(i => i.type === 'harvest'), customer = data.customers?.[0], planting = data.plantings?.[0];
   const me = data.me || sessionData || {};
   const farm = data.farm || {};
@@ -201,6 +202,8 @@ function App() {
 
   if (!sessionData) return <AuthPage onLogin={(payload) => { localStorage.setItem('agrocrm-session', JSON.stringify(payload)); setSession(JSON.stringify(payload)); }} />;
 
+  if (sessionData.role === 'admin') return <AdminApp session={sessionData} onLogout={() => { localStorage.removeItem('agrocrm-session'); setSession(''); }} />;
+
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand"><div className="logo"><FaLeaf /></div><span>AgroCRM</span></div>
@@ -219,6 +222,84 @@ function App() {
   </div>;
 }
 
+function AdminApp({session, onLogout}) {
+  const [tab, setTab] = useState('applications');
+  const [data, setData] = useState({summary: {}, applications: [], orders: []});
+  const [msg, setMsg] = useState('');
+  const load = async () => {
+    const [summary, applications, orders] = await Promise.all([
+      api('/admin/summary'),
+      api('/admin/applications'),
+      api('/admin/orders')
+    ]);
+    setData({summary, applications, orders});
+  };
+  useEffect(() => { load().catch(e => setMsg(e.message)); }, []);
+  const updateApplication = async (id, status) => { await patch(`/admin/applications/${id}`, {status}); setMsg(`Заявка #${id} обновлена`); await load(); };
+  const updateOrder = async (id, status) => { await patch(`/admin/orders/${id}`, {status}); setMsg(`Обращение #${id} обновлено`); await load(); };
+  const leads = (data.orders || []).filter(x => x.source === 'lead');
+  const orders = (data.orders || []).filter(x => x.source !== 'lead');
+  const rows = tab === 'applications' ? data.applications : tab === 'leads' ? leads : orders;
+  const stats = [
+    ['Новые заявки', data.summary?.newApplications || 0],
+    ['Новые лиды', data.summary?.newLeads || 0],
+    ['Новые заказы', data.summary?.newOrders || 0],
+    ['Всего обращений', (data.summary?.applications || 0) + (data.summary?.leads || 0) + (data.summary?.orders || 0)]
+  ];
+  return <main className="admin-root">
+    <aside className="admin-side">
+      <div className="admin-mark">A</div>
+      <div><b>AgroCRM Admin</b><span>Панель обработки заявок</span></div>
+      <nav>
+        <button className={tab === 'applications' ? 'active' : ''} onClick={() => setTab('applications')}>Заявки доступа</button>
+        <button className={tab === 'leads' ? 'active' : ''} onClick={() => setTab('leads')}>Лиды</button>
+        <button className={tab === 'orders' ? 'active' : ''} onClick={() => setTab('orders')}>Публичные заказы</button>
+      </nav>
+      <button className="admin-logout" onClick={onLogout}>Выйти</button>
+    </aside>
+    <section className="admin-main">
+      <header className="admin-head"><div><span>Администратор</span><h1>Входящие обращения</h1><p>Отдельная минимальная панель для обработки заявок, лидов и заказов.</p></div><div className="admin-user"><FaRegUser/><b>{session?.name || 'Админ'}</b></div></header>
+      {msg && <div className="admin-toast">{msg}</div>}
+      <div className="admin-stats">{stats.map(([label, value]) => <article key={label}><span>{label}</span><b>{value}</b></article>)}</div>
+      <div className="admin-toolbar"><h2>{tab === 'applications' ? 'Заявки на доступ' : tab === 'leads' ? 'Лиды с сайта' : 'Публичные заказы'}</h2><button onClick={() => load().catch(e => setMsg(e.message))}><FiRefreshCw/>Обновить</button></div>
+      <div className="admin-list">{rows.length ? rows.map(item => tab === 'applications'
+        ? <AdminApplication key={item.id} item={item} onStatus={updateApplication} />
+        : <AdminOrder key={item.id} item={item} onStatus={updateOrder} />)
+        : <div className="admin-empty"><b>Пока пусто</b><span>Новые обращения появятся здесь после отправки форм.</span></div>}
+      </div>
+    </section>
+  </main>;
+}
+
+function AdminApplication({item, onStatus}) {
+  return <article className="admin-row">
+    <div className="admin-row-top"><span className={`admin-status ${item.status}`}>{adminStatusLabel(item.status)}</span><time>{formatDate(item.created_at)}</time></div>
+    <h3>{item.owner_name || 'Без имени'} {item.farm_name ? `· ${item.farm_name}` : ''}</h3>
+    <div className="admin-fields"><span>Телефон: <b>{item.phone || '—'}</b></span><span>Email: <b>{item.email || '—'}</b></span><span>Регион: <b>{item.region || '—'}</b></span><span>Земля: <b>{item.land_area || '—'}</b></span><span>Масштаб: <b>{item.business_scale || '—'}</b></span></div>
+    {item.comment && <p>{item.comment}</p>}
+    <AdminActions id={item.id} status={item.status} onStatus={onStatus} />
+  </article>;
+}
+
+function AdminOrder({item, onStatus}) {
+  return <article className="admin-row">
+    <div className="admin-row-top"><span className={`admin-status ${item.status}`}>{adminStatusLabel(item.status)}</span><time>{formatDate(item.created_at)}</time></div>
+    <h3>{item.customer_name || 'Без имени'} <small>{item.source === 'lead' ? 'Лид' : 'Заказ'}</small></h3>
+    <div className="admin-fields"><span>Телефон: <b>{item.phone || '—'}</b></span><span>Email: <b>{item.email || '—'}</b></span><span>Вес: <b>{formatKg(item.total_quantity_kg)}</b></span><span>Сумма: <b>{num(item.estimated_amount).toLocaleString('ru-RU')} ₽</b></span></div>
+    <pre>{typeof item.items_json === 'string' ? item.items_json : JSON.stringify(item.items_json || [], null, 2)}</pre>
+    <AdminActions id={item.id} status={item.status} onStatus={onStatus} />
+  </article>;
+}
+
+function AdminActions({id, status, onStatus}) {
+  const options = [['new', 'Новая'], ['in_progress', 'В работе'], ['approved', 'Одобрить'], ['done', 'Готово'], ['rejected', 'Отклонить']];
+  return <div className="admin-actions">{options.map(([value, label]) => <button key={value} disabled={status === value} onClick={() => onStatus(id, value)}>{label}</button>)}</div>;
+}
+
+function adminStatusLabel(status = 'new') {
+  return ({new: 'Новая', in_progress: 'В работе', approved: 'Одобрена', done: 'Готово', rejected: 'Отклонена', cancelled: 'Отменена'})[status] || status;
+}
+
 function AuthPage({onLogin}) {
   const [mode, setMode] = useState('login');
   const [login, setLogin] = useState({email: '', password: ''});
@@ -230,7 +311,7 @@ function AuthPage({onLogin}) {
   return <main className="auth-page">
     <section className="auth-hero"><div className="auth-brand"><div className="logo"><FaLeaf /></div><span>AgroCRM</span></div><h1>CRM для фермеров — доступ выдаётся после заявки</h1><p>Мы собираем данные о хозяйстве, оформляем профиль фермы и выдаём владельцу личный логин и пароль.</p><div className="auth-points"><span><FiCheck/>Профиль под ваше хозяйство</span><span><FiCheck/>Учёт земли, посевов и склада</span><span><FiCheck/>Аналитика прибыли и продаж</span></div></section>
     <section className="auth-grid single">
-      <div className="auth-card auth-switch-card"><div className="auth-switch"><button className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>Вход</button><button className={mode === 'request' ? 'active' : ''} onClick={() => setMode('request')}>Заявка на доступ</button></div>{mode === 'login' ? <form className="login-card" onSubmit={submitLogin}><span className="eyebrow">Уже есть доступ</span><h2>Вход в CRM</h2><label><FiMail/><input value={login.email} onChange={e=>setLogin({...login,email:e.target.value})} placeholder="Логин / email" /></label><label><FiLock/><input value={login.password} onChange={e=>setLogin({...login,password:e.target.value})} type="password" placeholder="Пароль" /></label><button className="auth-primary">Войти</button><button type="button" className="auth-demo" onClick={()=>onLogin({farmId:1,name:'Демо'})}>Войти в демо</button><small>Логин и пароль выдаёт команда AgroCRM после подключения.</small></form> : <form className="request-card" onSubmit={submitApplication}><span className="eyebrow">Нужен доступ</span><h2>Заявка на подключение</h2><div className="request-grid"><label><FiUser/><input required value={form.ownerName} onChange={e=>set('ownerName',e.target.value)} placeholder="ФИО предпринимателя" /></label><label><FaLeaf/><input value={form.farmName} onChange={e=>set('farmName',e.target.value)} placeholder="Название хозяйства" /></label><label><FiPhone/><input required value={form.phone} onChange={e=>set('phone',e.target.value)} placeholder="Телефон" /></label><label><FiMail/><input value={form.email} onChange={e=>set('email',e.target.value)} placeholder="Почта" /></label><label><FiMapPin/><input value={form.region} onChange={e=>set('region',e.target.value)} placeholder="Регион" /></label><label><GiFarmTractor/><input value={form.landArea} onChange={e=>set('landArea',e.target.value)} placeholder="Масштаб земли, например 20 га" /></label></div><select value={form.businessScale} onChange={e=>set('businessScale',e.target.value)}><option value="">Формат хозяйства</option><option>Личное подсобное хозяйство</option><option>ИП / малый фермер</option><option>Среднее хозяйство</option><option>Агробизнес с продажами</option></select><textarea value={form.comment} onChange={e=>set('comment',e.target.value)} placeholder="Что выращиваете и какие задачи хотите закрыть?" />{status && <div className="request-status"><FiCheck/>{status}</div>}<button className="auth-primary">Отправить заявку</button></form>}</div>
+      <div className="auth-card auth-switch-card"><div className="auth-switch"><button className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>Вход</button><button className={mode === 'request' ? 'active' : ''} onClick={() => setMode('request')}>Заявка на доступ</button></div>{mode === 'login' ? <form className="login-card" onSubmit={submitLogin}><span className="eyebrow">Уже есть доступ</span><h2>Вход в CRM</h2><label><FiMail/><input value={login.email} onChange={e=>setLogin({...login,email:e.target.value})} placeholder="Логин / email" /></label><label><FiLock/><input value={login.password} onChange={e=>setLogin({...login,password:e.target.value})} type="password" placeholder="Пароль" /></label><button className="auth-primary">Войти</button><button type="button" className="auth-demo" onClick={()=>onLogin({farmId:1,name:'Демо'})}>Войти в демо</button><small>Фермерский доступ выдаёт команда AgroCRM. Админ: admin / admin</small></form> : <form className="request-card" onSubmit={submitApplication}><span className="eyebrow">Нужен доступ</span><h2>Заявка на подключение</h2><div className="request-grid"><label><FiUser/><input required value={form.ownerName} onChange={e=>set('ownerName',e.target.value)} placeholder="ФИО предпринимателя" /></label><label><FaLeaf/><input value={form.farmName} onChange={e=>set('farmName',e.target.value)} placeholder="Название хозяйства" /></label><label><FiPhone/><input required value={form.phone} onChange={e=>set('phone',e.target.value)} placeholder="Телефон" /></label><label><FiMail/><input value={form.email} onChange={e=>set('email',e.target.value)} placeholder="Почта" /></label><label><FiMapPin/><input value={form.region} onChange={e=>set('region',e.target.value)} placeholder="Регион" /></label><label><GiFarmTractor/><input value={form.landArea} onChange={e=>set('landArea',e.target.value)} placeholder="Масштаб земли, например 20 га" /></label></div><select value={form.businessScale} onChange={e=>set('businessScale',e.target.value)}><option value="">Формат хозяйства</option><option>Личное подсобное хозяйство</option><option>ИП / малый фермер</option><option>Среднее хозяйство</option><option>Агробизнес с продажами</option></select><textarea value={form.comment} onChange={e=>set('comment',e.target.value)} placeholder="Что выращиваете и какие задачи хотите закрыть?" />{status && <div className="request-status"><FiCheck/>{status}</div>}<button className="auth-primary">Отправить заявку</button></form>}</div>
     </section>
   </main>;
 }

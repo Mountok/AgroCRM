@@ -8,6 +8,7 @@ import (
 	"agrocrm/backend/internal/config"
 	"agrocrm/backend/internal/handlers"
 	"agrocrm/backend/internal/httpx"
+	"agrocrm/backend/internal/mailer"
 	"agrocrm/backend/internal/store"
 
 	"github.com/gin-contrib/cors"
@@ -41,7 +42,7 @@ func main() {
 		MaxAge:          12 * time.Hour,
 	}))
 
-	api := handlers.New(db, httpx.NewLimiter())
+	api := handlers.New(db, httpx.NewLimiter(), mailer.New(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.ApplicationsEmail))
 	api.RegisterRoutes(r)
 
 	log.Fatal(r.Run(":" + cfg.Port))

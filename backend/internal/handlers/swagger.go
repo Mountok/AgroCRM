@@ -43,6 +43,7 @@ const swaggerUITemplate = `<!DOCTYPE html>
 </html>`
 
 func swaggerUIHandler(c *gin.Context) {
+	c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data:; font-src 'self' data: https://unpkg.com; connect-src 'self'; frame-ancestors 'none'")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(swaggerUITemplate))
 }
 
