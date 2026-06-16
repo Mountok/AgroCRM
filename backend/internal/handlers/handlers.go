@@ -69,6 +69,7 @@ func (a *API) RegisterRoutes(r *gin.Engine) {
 	r.GET("/plantings/:plantingId", a.one("SELECT p.*, c.name crop_name, f.name field_name FROM plantings p JOIN crops c ON c.id=p.crop_id JOIN fields f ON f.id=p.field_id WHERE p.id=$1", "plantingId"))
 	r.PATCH("/plantings/:plantingId", a.patchPlanting)
 	r.POST("/plantings/:plantingId/complete", a.status("plantings", "plantingId", "harvested"))
+	r.DELETE("/plantings/:plantingId", a.deletePlanting)
 
 	r.GET("/farms/:farmId/tasks", a.listByFarm("SELECT * FROM tasks WHERE farm_id=$1 ORDER BY due_date,id"))
 	r.POST("/farms/:farmId/tasks", a.createTask)
@@ -324,9 +325,121 @@ func (a *API) createPlanting(c *gin.Context) {
 }
 func (a *API) patchPlanting(c *gin.Context) {
 	id, ok := idParam(c, "plantingId")
-	if ok {
-		a.exec(c, "UPDATE plantings SET status=COALESCE(NULLIF($1,''),status), updated_at=now() WHERE id=$2", readText(c, "status"), id)
+	if !ok {
+		return
 	}
+	var in struct {
+		FieldID, CropID                 *int     `json:"fieldID"`
+		SeedQuantityKg, ExpectedYieldKg *float64 `json:"seedQuantityKg"`
+		Status                         string   `json:"status"`
+		PlantingDate                   string   `json:"plantingDate"`
+		PlannedHarvestDate             string   `json:"plannedHarvestDate"`
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	if in.FieldID != nil && *in.FieldID <= 0 || in.CropID != nil && *in.CropID <= 0 || in.SeedQuantityKg != nil && *in.SeedQuantityKg < 0 || in.ExpectedYieldKg != nil && *in.ExpectedYieldKg < 0 {
+		httpx.Error(c, 422, "VALIDATION_ERROR", "Некорректные данные посева")
+		return
+	}
+	tx, _ := a.store.DB.Begin()
+	defer tx.Rollback()
+	var oldCropID int
+	var oldSeedQty float64
+	if err := tx.QueryRow("SELECT crop_id,seed_quantity_kg FROM plantings WHERE id=$1 FOR UPDATE", id).Scan(&oldCropID, &oldSeedQty); err != nil {
+		if err == sql.ErrNoRows {
+			httpx.Error(c, 404, "NOT_FOUND", "Посев не найден")
+		} else {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка базы данных")
+		}
+		return
+	}
+	newCropID := oldCropID
+	if in.CropID != nil {
+		newCropID = *in.CropID
+	}
+	newSeedQty := oldSeedQty
+	if in.SeedQuantityKg != nil {
+		newSeedQty = *in.SeedQuantityKg
+	}
+	if newCropID != oldCropID || newSeedQty != oldSeedQty {
+		if _, err := tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg+$1, updated_at=now() WHERE crop_id=$2 AND type='seed' AND farm_id=(SELECT farm_id FROM plantings WHERE id=$3)", oldSeedQty, oldCropID, id); err != nil {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка возврата семян")
+			return
+		}
+		var itemID int
+		var qty float64
+		if err := tx.QueryRow("SELECT id,quantity_kg FROM inventory_items WHERE crop_id=$1 AND type='seed' AND farm_id=(SELECT farm_id FROM plantings WHERE id=$2) LIMIT 1 FOR UPDATE", newCropID, id).Scan(&itemID, &qty); err != nil || qty < newSeedQty {
+			httpx.Error(c, 409, "INSUFFICIENT_SEED", "Недостаточно семян на складе для обновления посева")
+			return
+		}
+		tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg-$1, updated_at=now() WHERE id=$2", newSeedQty, itemID)
+	}
+	fieldID, cropID, seedQty, expectedYield := sql.NullInt64{}, sql.NullInt64{}, sql.NullFloat64{}, sql.NullFloat64{}
+	if in.FieldID != nil {
+		fieldID = sql.NullInt64{Int64: int64(*in.FieldID), Valid: true}
+	}
+	if in.CropID != nil {
+		cropID = sql.NullInt64{Int64: int64(*in.CropID), Valid: true}
+	}
+	if in.SeedQuantityKg != nil {
+		seedQty = sql.NullFloat64{Float64: *in.SeedQuantityKg, Valid: true}
+	}
+	if in.ExpectedYieldKg != nil {
+		expectedYield = sql.NullFloat64{Float64: *in.ExpectedYieldKg, Valid: true}
+	}
+	res, err := tx.Exec("UPDATE plantings SET field_id=COALESCE($1,field_id), crop_id=COALESCE($2,crop_id), seed_quantity_kg=COALESCE($3,seed_quantity_kg), expected_yield_kg=COALESCE($4,expected_yield_kg), status=COALESCE(NULLIF($5,''),status), planting_date=COALESCE(NULLIF($6,'')::date,planting_date), planned_harvest_date=COALESCE(NULLIF($7,'')::date,planned_harvest_date), cost_amount=COALESCE($3,seed_quantity_kg)*18, updated_at=now() WHERE id=$8", fieldID, cropID, seedQty, expectedYield, trim(in.Status, 40), trim(in.PlantingDate, 20), trim(in.PlannedHarvestDate, 20), id)
+	if err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка обновления посева")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		httpx.Error(c, 404, "NOT_FOUND", "Посев не найден")
+		return
+	}
+	tx.Commit()
+	c.JSON(200, gin.H{"ok": true})
+}
+func (a *API) deletePlanting(c *gin.Context) {
+	id, ok := idParam(c, "plantingId")
+	if !ok {
+		return
+	}
+	tx, _ := a.store.DB.Begin()
+	defer tx.Rollback()
+	var farmID, cropID int
+	var seedQty float64
+	if err := tx.QueryRow("SELECT farm_id,crop_id,seed_quantity_kg FROM plantings WHERE id=$1 FOR UPDATE", id).Scan(&farmID, &cropID, &seedQty); err != nil {
+		if err == sql.ErrNoRows {
+			httpx.Error(c, 404, "NOT_FOUND", "Посев не найден")
+		} else {
+			httpx.Error(c, 500, "DB_ERROR", "Ошибка базы данных")
+		}
+		return
+	}
+	if _, err := tx.Exec("UPDATE inventory_items SET quantity_kg=quantity_kg+$1, updated_at=now() WHERE farm_id=$2 AND crop_id=$3 AND type='seed'", seedQty, farmID, cropID); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка возврата семян")
+		return
+	}
+	if _, err := tx.Exec("UPDATE harvests SET planting_id=NULL WHERE planting_id=$1", id); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка удаления связанного урожая")
+		return
+	}
+	if _, err := tx.Exec("DELETE FROM tasks WHERE planting_id=$1", id); err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка удаления связанных задач")
+		return
+	}
+	res, err := tx.Exec("DELETE FROM plantings WHERE id=$1", id)
+	if err != nil {
+		httpx.Error(c, 500, "DB_ERROR", "Ошибка удаления посева")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		httpx.Error(c, 404, "NOT_FOUND", "Посев не найден")
+		return
+	}
+	tx.Commit()
+	c.JSON(200, gin.H{"ok": true})
 }
 func (a *API) createTask(c *gin.Context) {
 	var in struct {
